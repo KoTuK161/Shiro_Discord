@@ -35,7 +35,7 @@ async def on_ready():
 #       ОТОБРАЗИТЬ КОМАНДЫ
         print("Команды:")
         for cmd in bot.tree.get_commands():
-        print("-", cmd.name)
+            print("-", cmd.name)
 #-------------------------     
         bot.tree.clear_commands(guild=guild)
         synced = await bot.tree.sync(guild=guild)
