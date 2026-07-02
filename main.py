@@ -13,7 +13,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("/app/bot.log", encoding="utf-8"),
+        logging.FileHandler("/app/data/bot.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -61,13 +61,12 @@ async def on_ready():
 
     if DEBUG:
         guild = discord.Object(id=GUILD_ID)
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
+        # Очищаем старые гильдийные команды
+        bot.tree.clear_commands(guild=guild)
+        await bot.tree.sync(guild=guild)
+        # Синхронизируем глобально
+        synced = await bot.tree.sync()
     else:
-        bot.tree.clear_commands(guild=discord.Object(id=GUILD_ID))
-        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
         synced = await bot.tree.sync()
 
     log.info("Команды, которые Discord принял:")
