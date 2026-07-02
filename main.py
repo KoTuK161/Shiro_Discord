@@ -35,7 +35,7 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"Глобальный режим: синхронизировано {len(synced)} команд.")
     await bot.change_presence(
-        activity=discord.Game("в шахматы")
+        activity=discord.Game("Играет в шахматы")
     )
 
 @bot.event
