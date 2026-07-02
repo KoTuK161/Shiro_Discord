@@ -5,6 +5,8 @@ import discord
 from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+DEBUG = os.getenv("DEBUG", "False") == "True"
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 BASE_DIR = Path(__file__).parent
 IMAGE_DIR = BASE_DIR / "images"
@@ -21,15 +23,20 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
-    activity = discord.Game(name="в шахматы")
+    if getattr(bot, "_synced", False):
+        return
+    bot._synced = True
+    if DEBUG:
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.clear_commands(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Режим разработки: синхронизировано {len(synced)} команд.")
+    else:
+        synced = await bot.tree.sync()
+        print(f"Глобальный режим: синхронизировано {len(synced)} команд.")
     await bot.change_presence(
-        status=discord.Status.online,
-        activity=activity
+        activity=discord.Game("в шахматы")
     )
-    print("=" * 40)
-    print(f"Бот запущен: {bot.user}")
-    print(f"ID: {bot.user.id}")
-    print("=" * 40)
 
 @bot.event
 async def on_message(message):
