@@ -63,6 +63,7 @@ async def on_ready():
         guild = discord.Object(id=GUILD_ID)
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
+        bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
     else:
         bot.tree.clear_commands(guild=discord.Object(id=GUILD_ID))
