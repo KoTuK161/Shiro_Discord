@@ -26,26 +26,33 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
-    if getattr(bot, "_synced", False):
-        return
-    bot._synced = True
+    print("=" * 60)
+    print(f"Bot User: {bot.user}")
+    print(f"Application ID: {bot.application_id}")
+    print(f"Guild ID: {GUILD_ID}")
+    print(f"DEBUG: {DEBUG}")
+
+    print("\nКоманды в tree ДО sync:")
+    for cmd in bot.tree.get_commands():
+        print(f" - {cmd.name}")
+
     if DEBUG:
         guild = discord.Object(id=GUILD_ID)
-#-------------------------
-#       ОТОБРАЗИТЬ КОМАНДЫ
-        print("Команды:")
-        for cmd in bot.tree.get_commands():
-            print("-", cmd.name)
-#-------------------------     
-        bot.tree.clear_commands(guild=guild)
         synced = await bot.tree.sync(guild=guild)
-        print(f"Режим разработки: синхронизировано {len(synced)} команд.")
     else:
         synced = await bot.tree.sync()
-        print(f"Глобальный режим: синхронизировано {len(synced)} команд.")
+
+    print("\nКоманды, которые Discord принял:")
+    for cmd in synced:
+        print(f" - {cmd.name}")
+
+    print(f"\nВсего синхронизировано: {len(synced)}")
+
     await bot.change_presence(
         activity=discord.Game("Играет в шахматы")
     )
+
+    print("=" * 60)
 
 @bot.event
 async def on_message(message):
