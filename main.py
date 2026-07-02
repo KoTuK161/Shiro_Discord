@@ -37,22 +37,20 @@ async def on_ready():
         print(f" - {cmd.name}")
 
     if DEBUG:
-        guild = discord.Object(id=GUILD_ID)
-        synced = await bot.tree.sync(guild=guild)
-    else:
-        synced = await bot.tree.sync()
-
-    print("\nКоманды, которые Discord принял:")
-    for cmd in synced:
-        print(f" - {cmd.name}")
-
-    print(f"\nВсего синхронизировано: {len(synced)}")
-
-    await bot.change_presence(
-        activity=discord.Game("Играет в шахматы")
-    )
-
-    print("=" * 60)
+    guild = discord.Object(id=GUILD_ID)
+    
+    # Сначала очищаем глобальные команды
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()  # отправляем пустой список глобально
+    
+    # Потом синхронизируем гильдийные
+    synced = await bot.tree.sync(guild=guild)
+else:
+    # Очищаем гильдийные команды
+    bot.tree.clear_commands(guild=discord.Object(id=GUILD_ID))
+    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    
+    synced = await bot.tree.sync()
 
 @bot.event
 async def on_message(message):
