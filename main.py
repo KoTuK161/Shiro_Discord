@@ -8,6 +8,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DEBUG = os.getenv("DEBUG", "False") == "True"
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
+print(f"DEBUG = {DEBUG}")
+print(f"GUILD_ID = {GUILD_ID}")
+
 BASE_DIR = Path(__file__).parent
 IMAGE_DIR = BASE_DIR / "images"
 
@@ -28,6 +31,12 @@ async def on_ready():
     bot._synced = True
     if DEBUG:
         guild = discord.Object(id=GUILD_ID)
+#-------------------------
+#       ОТОБРАЗИТЬ КОМАНДЫ
+        print("Команды:")
+        for cmd in bot.tree.get_commands():
+        print("-", cmd.name)
+#-------------------------     
         bot.tree.clear_commands(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f"Режим разработки: синхронизировано {len(synced)} команд.")
