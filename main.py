@@ -1,15 +1,34 @@
 import os
 import asyncio
+import logging
 from pathlib import Path
 import discord
 from discord.ext import commands
+
+# ==========================================================
+# Логирование
+# ==========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("/app/data/bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
+
+# ==========================================================
+# Настройки
+# ==========================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEBUG = os.getenv("DEBUG", "False") == "True"
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
-print(f"DEBUG = {DEBUG}")
-print(f"GUILD_ID = {GUILD_ID}")
+log.info(f"DEBUG = {DEBUG}")
+log.info(f"GUILD_ID = {GUILD_ID}")
 
 BASE_DIR = Path(__file__).parent
 IMAGE_DIR = BASE_DIR / "images"
@@ -24,17 +43,21 @@ bot = commands.Bot(
     help_command=None
 )
 
+# ==========================================================
+# События
+# ==========================================================
+
 @bot.event
 async def on_ready():
-    print("=" * 60)
-    print(f"Bot User: {bot.user}")
-    print(f"Application ID: {bot.application_id}")
-    print(f"Guild ID: {GUILD_ID}")
-    print(f"DEBUG: {DEBUG}")
+    log.info("=" * 60)
+    log.info(f"Bot User: {bot.user}")
+    log.info(f"Application ID: {bot.application_id}")
+    log.info(f"Guild ID: {GUILD_ID}")
+    log.info(f"DEBUG: {DEBUG}")
 
-    print("\nКоманды в tree ДО sync:")
+    log.info("Команды в tree ДО sync:")
     for cmd in bot.tree.get_commands():
-        print(f" - {cmd.name}")
+        log.info(f" - {cmd.name}")
 
     if DEBUG:
         guild = discord.Object(id=GUILD_ID)
@@ -46,15 +69,17 @@ async def on_ready():
         await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
         synced = await bot.tree.sync()
 
-    print("\nКоманды, которые Discord принял:")
+    log.info("Команды, которые Discord принял:")
     for cmd in synced:
-        print(f" - {cmd.name}")
-    print(f"\nВсего синхронизировано: {len(synced)}")
+        log.info(f" - {cmd.name}")
+    log.info(f"Всего синхронизировано: {len(synced)}")
 
     await bot.change_presence(
+        status=discord.Status.online,
         activity=discord.Game("Играет в шахматы")
     )
-    print("=" * 60)
+    log.info("=" * 60)
+
 
 @bot.event
 async def on_message(message):
@@ -126,6 +151,10 @@ async def on_message(message):
             file=discord.File(IMAGE_DIR / "gif4.gif")
         )
 
+# ==========================================================
+# Загрузка Cogs
+# ==========================================================
+
 async def load_cogs():
     if not os.path.isdir("cogs"):
         return
@@ -133,9 +162,13 @@ async def load_cogs():
         if filename.endswith(".py") and not filename.startswith("_"):
             try:
                 await bot.load_extension(f"cogs.{filename[:-3]}")
-                print(f"Загружен модуль: {filename}")
+                log.info(f"Загружен модуль: {filename}")
             except Exception as e:
-                print(f"Ошибка загрузки {filename}: {e}")
+                log.error(f"Ошибка загрузки {filename}: {e}")
+
+# ==========================================================
+# Запуск
+# ==========================================================
 
 async def main():
     async with bot:
