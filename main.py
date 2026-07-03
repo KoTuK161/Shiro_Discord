@@ -30,9 +30,6 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 log.info(f"DEBUG = {DEBUG}")
 log.info(f"GUILD_ID = {GUILD_ID}")
 
-BASE_DIR = Path(__file__).parent
-IMAGE_DIR = BASE_DIR / "images"
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -42,6 +39,23 @@ bot = commands.Bot(
     intents=intents,
     help_command=None
 )
+
+# ==========================================================
+# Ссылки на изображения (вставь свои URL)
+# ==========================================================
+
+IMAGES = {
+    "img1": "https://cdn.discordapp.com/attachments/1265754689643872359/1265754752210440255/BsP0LMGEe1M.jpg",
+    "img2": "https://cdn.discordapp.com/attachments/1265754689643872359/1265800274698829835/no-game-no-life-shiro-volosy.webp",
+    "img3": "https://cdn.discordapp.com/attachments/1265754689643872359/1265800301084934286/b185d6126ad720a7.jpg",
+    "img4": "https://cdn.discordapp.com/attachments/1265754689643872359/1265803498851799132/1663368378_52-mykaleidoscope-ru-p-zloi-stikmen-emotsii-57.png",
+    "img5": "https://cdn.discordapp.com/attachments/1265754689643872359/1265804190744186912/b65410344f0d9f9efe9b4267fba8112a.png",
+    "img6": "https://cdn.discordapp.com/attachments/1265754689643872359/1265811826461904967/portada_no-game-no-life-11.jpg",
+    "gif1": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811764067696720/1.gif",
+    "gif2": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811696174370907/c18d43f5c2522738241e5ca0355c676b60b272e7_hq.gif",
+    "gif3": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811748317954110/5ac3cc6d4138136c.gif",
+    "gif4": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811773374599261/68747470733a2f2f73332e616d617a6f6e6177732e636f6d2f776174747061642d6d656469612d736572766963652f53746f7279496d6167652f4445325a567653663555754b31773d3d2d37322e313632323933373937306531333638393537373937333432383732302e676966.gif",
+}
 
 # ==========================================================
 # События
@@ -61,10 +75,8 @@ async def on_ready():
 
     if DEBUG:
         guild = discord.Object(id=GUILD_ID)
-        # Очищаем старые гильдийные команды
         bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
-        # Синхронизируем глобально
         synced = await bot.tree.sync()
     else:
         synced = await bot.tree.sync()
@@ -79,6 +91,17 @@ async def on_ready():
         activity=discord.Game("Играет в шахматы")
     )
     log.info("=" * 60)
+
+
+async def reply_with_image(message: discord.Message, text: str, image_key: str):
+    """Отправляет ответ с изображением через URL (embed)."""
+    url = IMAGES.get(image_key)
+    if url:
+        embed = discord.Embed(description=text)
+        embed.set_image(url=url)
+        await message.reply(embed=embed)
+    else:
+        await message.reply(text)
 
 
 @bot.event
@@ -101,55 +124,25 @@ async def on_message(message):
     words_gif4 = ["приятного", "аппетита"]
 
     if any(word in text for word in words_png1):
-        await message.reply(
-            "Ну серьёзно..)",
-            file=discord.File(IMAGE_DIR / "img1.png")
-        )
+        await reply_with_image(message, "Ну серьёзно..)", "img1")
     elif any(word in text for word in words_png2):
-        await message.reply(
-            "Мило 😍",
-            file=discord.File(IMAGE_DIR / "img2.png")
-        )
+        await reply_with_image(message, "Мило 😍", "img2")
     elif any(word in text for word in words_png3):
-        await message.reply(
-            "Давайте все вместе помолимся за наше духовное спокойствие 😇",
-            file=discord.File(IMAGE_DIR / "img3.png")
-        )
+        await reply_with_image(message, "Давайте все вместе помолимся за наше духовное спокойствие 😇", "img3")
     elif any(word in text for word in words_png4):
-        await message.reply(
-            "Не беситесь 👿",
-            file=discord.File(IMAGE_DIR / "img4.png")
-        )
+        await reply_with_image(message, "Не беситесь 👿", "img4")
     elif any(word in text for word in words_png5):
-        await message.reply(
-            "Присоединяюсь к поздравлениям! 🎉",
-            file=discord.File(IMAGE_DIR / "img5.png")
-        )
+        await reply_with_image(message, "Присоединяюсь к поздравлениям! 🎉", "img5")
     elif any(word in text for word in words_png6):
-        await message.reply(
-            "Даже круче, чем я?",
-            file=discord.File(IMAGE_DIR / "img6.png")
-        )
+        await reply_with_image(message, "Даже круче, чем я?", "img6")
     elif any(word in text for word in words_gif1):
-        await message.reply(
-            "Ну кто меня разбудил, чего хотели... 😴",
-            file=discord.File(IMAGE_DIR / "gif1.gif")
-        )
+        await reply_with_image(message, "Ну кто меня разбудил, чего хотели... 😴", "gif1")
     elif any(word in text for word in words_gif2):
-        await message.reply(
-            "Да ну Вас, извращенцы! 😒",
-            file=discord.File(IMAGE_DIR / "gif2.gif")
-        )
+        await reply_with_image(message, "Да ну Вас, извращенцы! 😒", "gif2")
     elif any(word in text for word in words_gif3):
-        await message.reply(
-            "М-м-мягкие 😊",
-            file=discord.File(IMAGE_DIR / "gif3.gif")
-        )
+        await reply_with_image(message, "М-м-мягкие 😊", "gif3")
     elif any(word in text for word in words_gif4):
-        await message.reply(
-            "Приятного аппетита! 🍩",
-            file=discord.File(IMAGE_DIR / "gif4.gif")
-        )
+        await reply_with_image(message, "Приятного аппетита! 🍩", "gif4")
 
 # ==========================================================
 # Загрузка Cogs
