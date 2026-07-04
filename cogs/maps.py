@@ -13,9 +13,9 @@ MAPS = [
 ]
 
 MAP_EMOJI = {
-    "Квартал Э":   "🏙️",
-    "Место Бури":  "⛈️",
-    "Край Света": "🌋"
+    "E-District":   "🏙️",
+    "Storm Point":  "⛈️",
+    "World's Edge": "🌋"
 }
 
 class Maps(commands.Cog):
