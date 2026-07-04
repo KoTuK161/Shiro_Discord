@@ -3,7 +3,7 @@ import asyncio
 import logging
 from pathlib import Path
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 # ==========================================================
 # Логирование
@@ -23,12 +23,14 @@ log = logging.getLogger(__name__)
 # Настройки
 # ==========================================================
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-DEBUG = os.getenv("DEBUG", "False") == "True"
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+TOKEN          = os.getenv("DISCORD_TOKEN")
+DEBUG          = os.getenv("DEBUG", "False") == "True"
+GUILD_ID       = int(os.getenv("GUILD_ID", "0"))
+VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID", "0"))  # ID голосового канала
 
 log.info(f"DEBUG = {DEBUG}")
 log.info(f"GUILD_ID = {GUILD_ID}")
+log.info(f"VOICE_CHANNEL_ID = {VOICE_CHANNEL_ID}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -41,7 +43,7 @@ bot = commands.Bot(
 )
 
 # ==========================================================
-# Ссылки на изображения (вставь свои URL)
+# Ссылки на изображения
 # ==========================================================
 
 IMAGES = {
@@ -56,6 +58,50 @@ IMAGES = {
     "gif3": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811748317954110/5ac3cc6d4138136c.gif",
     "gif4": "https://cdn.discordapp.com/attachments/1265811455308070973/1265811773374599261/68747470733a2f2f73332e616d617a6f6e6177732e636f6d2f776174747061642d6d656469612d736572766963652f53746f7279496d6167652f4445325a567653663555754b31773d3d2d37322e313632323933373937306531333638393537373937333432383732302e676966.gif",
 }
+
+# ==========================================================
+# Голосовой канал — фоновая задача
+# ==========================================================
+
+@tasks.loop(seconds=30)
+async def voice_keep_alive():
+    if VOICE_CHANNEL_ID == 0:
+        return
+
+    # Ищем канал только среди серверов, где он есть
+    # get_channel вернёт None если канала нет ни на одном сервере бота
+    channel = bot.get_channel(VOICE_CHANNEL_ID)
+    if channel is None:
+        # Канала с таким ID нет ни на одном из серверов бота — ничего не делаем
+        return
+
+    if not isinstance(channel, discord.VoiceChannel):
+        log.warning(f"Канал {VOICE_CHANNEL_ID} существует, но не является голосовым.")
+        return
+
+    guild = channel.guild
+    vc = guild.voice_client  # голосовое подключение именно на этом сервере
+
+    if vc and vc.is_connected():
+        if vc.channel.id == VOICE_CHANNEL_ID:
+            # Уже в нужном канале — всё хорошо
+            return
+        else:
+            # Подключён к другому каналу на том же сервере — переходим
+            log.info(f"Перехожу в канал {channel.name} ({VOICE_CHANNEL_ID})")
+            await vc.move_to(channel)
+    else:
+        # Не подключён — заходим
+        log.info(f"Подключаюсь к голосовому каналу {channel.name} ({VOICE_CHANNEL_ID})")
+        await channel.connect() #(self_deaf=True)  # бот будет с заглушёнными ушами
+
+@voice_keep_alive.before_loop
+async def before_voice_keep_alive():
+    await bot.wait_until_ready()
+
+@voice_keep_alive.error
+async def voice_keep_alive_error(error):
+    log.error(f"Ошибка в voice_keep_alive: {error}")
 
 # ==========================================================
 # События
@@ -90,6 +136,12 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Game("Играет в шахматы")
     )
+
+    # Запускаем фоновую задачу голосового канала
+    if not voice_keep_alive.is_running():
+        voice_keep_alive.start()
+        log.info("voice_keep_alive запущен")
+
     log.info("=" * 60)
 
 
