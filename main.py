@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import logging
 from pathlib import Path
@@ -107,6 +108,20 @@ async def voice_keep_alive_error(error):
 # События
 # ==========================================================
 
+
+def get_shiro_react(guild_id) -> bool:
+    """Проверяет включена ли реакция бота на слова для данного сервера."""
+    try:
+        from pathlib import Path
+        f = Path("/app/data/adm_panel.json")
+        if f.exists():
+            d = json.loads(f.read_text("utf-8"))
+            cfg = d.get(str(guild_id), {})
+            return cfg.get("shiro_react", True)
+    except Exception:
+        pass
+    return True
+
 @bot.event
 async def on_ready():
     log.info("=" * 60)
@@ -162,6 +177,10 @@ async def on_message(message):
         return
     await bot.process_commands(message)
     text = message.content.lower()
+
+    # Проверяем включены ли реакции на слова для этого сервера
+    if message.guild and not get_shiro_react(message.guild.id):
+        return
 
     words_png1 = ["заебал", "надоел"]
     words_png2 = ["мило", "красиво", "кавайно"]
