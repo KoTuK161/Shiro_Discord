@@ -1,7 +1,9 @@
 import os
+import json
 import time
 import asyncio
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 import aiohttp
 import discord
 from discord import app_commands
@@ -10,14 +12,10 @@ from discord.ext import commands
 API_KEY = os.getenv("APEX_API_KEY")
 API_URL = "https://api.mozambiquehe.re/maprotation"
 
-MSK = timezone(timedelta(hours=3))
+MSK      = timezone(timedelta(hours=3))
 ROTATION = timedelta(hours=4, minutes=30)
 
-MAPS = [
-    "E-District",
-    "Storm Point",
-    "World's Edge",
-]
+MAPS = ["E-District", "Storm Point", "World's Edge"]
 
 MAP_EMOJI = {
     "E-District":   "🏙️",
@@ -38,13 +36,23 @@ MAP_IMAGES = {
 }
 
 SCHEDULE_SLOTS = 6
-CACHE_TTL = 60
+CACHE_TTL      = 60
+_cache         = {"data": None, "ts": 0}
 
-_cache = {"data": None, "ts": 0}
+
+def get_guild_cfg(guild_id) -> dict:
+    try:
+        from adm_panel import DATA_FILE, DEFAULTS
+        if DATA_FILE.exists():
+            d   = json.loads(DATA_FILE.read_text("utf-8"))
+            cfg = d.get(str(guild_id), {})
+            return {**DEFAULTS, **cfg}
+    except Exception:
+        pass
+    return {}
 
 
 async def send_and_delete(interaction, delay=86400, **kwargs):
-    """Отправляет followup-сообщение и удаляет его через delay секунд."""
     msg = await interaction.followup.send(**kwargs)
     async def _delete():
         await asyncio.sleep(delay)
@@ -67,7 +75,7 @@ async def fetch_rotation() -> dict | None:
                     return None
                 data = await r.json()
                 _cache["data"] = data
-                _cache["ts"] = now
+                _cache["ts"]   = now
                 return data
     except Exception:
         return None
@@ -77,36 +85,23 @@ def get_emoji(map_name: str) -> str:
     return MAP_EMOJI.get(map_name, "🗺️")
 
 
-def format_remaining(remaining_secs: int) -> str:
-    h, r = divmod(max(remaining_secs, 0), 3600)
+def format_remaining(secs: int) -> str:
+    h, r = divmod(max(secs, 0), 3600)
     m, s = divmod(r, 60)
-    if h > 0:
-        return f"{h}ч {m:02d}м {s:02d}с"
-    return f"{m}м {s:02d}с"
+    return f"{h}ч {m:02d}м {s:02d}с" if h > 0 else f"{m}м {s:02d}с"
 
 
 def round_time(dt: datetime) -> datetime:
-    if dt.minute == 59:
-        dt = dt + timedelta(minutes=1)
-    return dt
+    return dt + timedelta(minutes=1) if dt.minute == 59 else dt
 
 
 def build_schedule(current_name: str, slot_end: datetime) -> list[str]:
+    idx = MAPS.index(current_name) if current_name in MAPS else -1
     lines = []
-    if current_name in MAPS:
-        idx = MAPS.index(current_name)
-    else:
-        idx = -1
-
     for i in range(1, SCHEDULE_SLOTS + 1):
-        future_idx = (idx + i) % len(MAPS)
-        future_name = MAPS[future_idx]
-        future_start = slot_end + ROTATION * (i - 1)
-        future_start = round_time(future_start)
-        emoji = get_emoji(future_name)
-        time_str = future_start.strftime("%H:%M %d.%m")
-        lines.append(f"{time_str} — {emoji} {future_name}")
-
+        future_name  = MAPS[(idx + i) % len(MAPS)]
+        future_start = round_time(slot_end + ROTATION * (i - 1))
+        lines.append(f"{future_start.strftime('%H:%M %d.%m')} — {get_emoji(future_name)} {future_name}")
     return lines
 
 
@@ -116,39 +111,39 @@ class Maps(commands.Cog):
 
     @app_commands.command(name="map", description="Текущая карта Apex (BR Ranked)")
     async def map(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        # Проверка канала из adm_panel
+        cfg     = get_guild_cfg(interaction.guild_id)
+        chan_id = cfg.get("map_channel_id")
+        if chan_id and interaction.channel_id != int(chan_id):
+            await interaction.response.send_message(
+                f"❌ Эта команда работает только в канале <#{chan_id}>", ephemeral=True
+            )
+            return
 
+        await interaction.response.defer()
         data = await fetch_rotation()
         if data is None:
-            await send_and_delete(interaction, content="❌ Не удалось получить данные о ротации карт. Попробуй позже.")
+            await send_and_delete(interaction, content="❌ Не удалось получить данные ротации.")
             return
-
         br = data.get("ranked")
         if not br:
-            await send_and_delete(interaction, content="❌ Данные о ранкед-ротации недоступны.")
+            await send_and_delete(interaction, content="❌ Данные ранкед-ротации недоступны.")
             return
 
-        current = br.get("current", {})
-        current_name = current.get("map", "Неизвестно")
-        current_emoji = get_emoji(current_name)
+        current       = br.get("current", {})
+        current_name  = current.get("map", "Неизвестно")
+        remaining_sec = current.get("remainingMins", 0) * 60
+        slot_end      = datetime.now(MSK) + timedelta(seconds=remaining_sec)
 
-        remaining_secs = current.get("remainingMins", 0) * 60
-        remaining_str = format_remaining(remaining_secs)
-
-        now = datetime.now(MSK)
-        slot_end = now + timedelta(seconds=remaining_secs)
-
-        schedule_lines = build_schedule(current_name, slot_end)
-        schedule_text = "\n".join(schedule_lines) if schedule_lines else "Нет данных"
+        schedule_text = "\n".join(build_schedule(current_name, slot_end)) or "Нет данных"
 
         e = discord.Embed(title="Ротация карт Apex Legends (Ranked)", color=0x3498db)
-        e.add_field(name="🗺️ Текущая карта", value=f"{current_emoji} **{current_name}**", inline=False)
-        e.add_field(name="⏱️ До смены", value=remaining_str, inline=False)
-        e.add_field(name="📅 Дальнейшее расписание", value=f"```{schedule_text}```", inline=False)
+        e.add_field(name="🗺️ Текущая карта",       value=f"{get_emoji(current_name)} **{current_name}**", inline=False)
+        e.add_field(name="⏱️ До смены",             value=format_remaining(remaining_sec),                inline=False)
+        e.add_field(name="📅 Дальнейшее расписание", value=f"```{schedule_text}```",                       inline=False)
 
-        image_url = MAP_IMAGES.get(current_name)
-        if image_url:
-            e.set_image(url=image_url)
+        if img := MAP_IMAGES.get(current_name):
+            e.set_image(url=img)
 
         await send_and_delete(interaction, embed=e)
 
