@@ -3,3 +3,4 @@ PyNaCl
 aiohttp
 pyTelegramBotAPI
 requests
+python-chess
