@@ -4,3 +4,4 @@ aiohttp
 pyTelegramBotAPI
 requests
 python-chess
+Pillow
