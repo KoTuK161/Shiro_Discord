@@ -146,38 +146,134 @@ active_games: dict[int, ChessGame] = {}
 
 
 # ==========================================================
-# Рендер доски
+# Рендер доски — PNG через Pillow
 # ==========================================================
 
-def render_board(board: chess.Board, last_move: Optional[chess.Move] = None) -> str:
+import io
+from PIL import Image, ImageDraw, ImageFont
+
+PIECES_DIR  = Path("/app/pieces")   # папка с PNG фигурами
+CELL_SIZE   = 80                    # размер клетки в пикселях
+BORDER      = 40                    # отступ для координат
+BOARD_SIZE  = CELL_SIZE * 8 + BORDER * 2
+
+# Цвета доски
+COLOR_LIGHT     = (240, 217, 181)   # светлая клетка
+COLOR_DARK      = (181, 136,  99)   # тёмная клетка
+COLOR_HIGHLIGHT = (205, 210,  60)   # подсветка последнего хода
+COLOR_BORDER    = ( 99,  71,  50)   # рамка / фон координат
+COLOR_TEXT      = (255, 255, 255)   # цвет координат
+
+# Маппинг python-chess → имя файла фигуры
+PIECE_FILE = {
+    (chess.KING,   chess.WHITE): "wK",
+    (chess.QUEEN,  chess.WHITE): "wQ",
+    (chess.ROOK,   chess.WHITE): "wR",
+    (chess.BISHOP, chess.WHITE): "wB",
+    (chess.KNIGHT, chess.WHITE): "wN",
+    (chess.PAWN,   chess.WHITE): "wP",
+    (chess.KING,   chess.BLACK): "bK",
+    (chess.QUEEN,  chess.BLACK): "bQ",
+    (chess.ROOK,   chess.BLACK): "bR",
+    (chess.BISHOP, chess.BLACK): "bB",
+    (chess.KNIGHT, chess.BLACK): "bN",
+    (chess.PAWN,   chess.BLACK): "bP",
+}
+
+# Кэш загруженных фигур
+_piece_cache: dict[str, Image.Image] = {}
+
+
+def _load_piece(name: str) -> Optional[Image.Image]:
+    if name in _piece_cache:
+        return _piece_cache[name]
+    path = PIECES_DIR / f"{name}.png"
+    if not path.exists():
+        log.warning(f"[chess] Файл фигуры не найден: {path}")
+        return None
+    img = Image.open(path).convert("RGBA").resize((CELL_SIZE, CELL_SIZE), Image.LANCZOS)
+    _piece_cache[name] = img
+    return img
+
+
+def render_board_image(board: chess.Board, last_move: Optional[chess.Move] = None) -> discord.File:
+    """Генерирует PNG изображение доски и возвращает discord.File."""
     highlight = set()
     if last_move:
         highlight.add(last_move.from_square)
         highlight.add(last_move.to_square)
 
-    lines = []
-    for rank in range(7, -1, -1):
-        row = f"{rank + 1} "
+    img  = Image.new("RGB", (BOARD_SIZE, BOARD_SIZE), COLOR_BORDER)
+    draw = ImageDraw.Draw(img)
+
+    # Пробуем загрузить шрифт, fallback на дефолтный
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Рисуем клетки
+    for rank in range(8):
+        for file in range(8):
+            sq = chess.square(file, rank)
+            x  = BORDER + file * CELL_SIZE
+            y  = BORDER + (7 - rank) * CELL_SIZE
+
+            if sq in highlight:
+                color = COLOR_HIGHLIGHT
+            elif (rank + file) % 2 == 0:
+                color = COLOR_DARK
+            else:
+                color = COLOR_LIGHT
+
+            draw.rectangle([x, y, x + CELL_SIZE, y + CELL_SIZE], fill=color)
+
+    # Рисуем фигуры
+    for rank in range(8):
         for file in range(8):
             sq    = chess.square(file, rank)
             piece = board.piece_at(sq)
-            if piece:
-                symbol = PIECES.get((piece.piece_type, piece.color), "?")
-            else:
-                symbol = "·" if (rank + file) % 2 == 0 else "▪"
-            if sq in highlight:
-                row += f"[{symbol}]"
-            else:
-                row += f" {symbol} "
-        lines.append(row)
-    lines.append("   a  b  c  d  e  f  g  h")
-    return "\n".join(lines)
+            if not piece:
+                continue
+            name     = PIECE_FILE.get((piece.piece_type, piece.color))
+            piece_img = _load_piece(name) if name else None
+            if piece_img:
+                x = BORDER + file * CELL_SIZE
+                y = BORDER + (7 - rank) * CELL_SIZE
+                img.paste(piece_img, (x, y), piece_img)
+
+    # Координаты — буквы снизу
+    files_letters = "abcdefgh"
+    for file in range(8):
+        x = BORDER + file * CELL_SIZE + CELL_SIZE // 2
+        draw.text((x, BOARD_SIZE - BORDER // 2 - 8), files_letters[file],
+                  fill=COLOR_TEXT, font=font, anchor="mm")
+        draw.text((x, BORDER // 2 - 2), files_letters[file],
+                  fill=COLOR_TEXT, font=font, anchor="mm")
+
+    # Координаты — цифры слева
+    for rank in range(8):
+        y = BORDER + (7 - rank) * CELL_SIZE + CELL_SIZE // 2
+        draw.text((BORDER // 2, y), str(rank + 1),
+                  fill=COLOR_TEXT, font=font, anchor="mm")
+        draw.text((BOARD_SIZE - BORDER // 2, y), str(rank + 1),
+                  fill=COLOR_TEXT, font=font, anchor="mm")
+
+    # Сохраняем в буфер
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename="board.png")
 
 
-def build_embed(game: ChessGame, title: str = None, description: str = None) -> discord.Embed:
-    board_str = render_board(game.board, game.last_move)
-    turn      = "Белые" if game.board.turn == chess.WHITE else "Чёрные"
-    turn_id   = game.white_id if game.board.turn == chess.WHITE else game.black_id
+def build_embed(
+    game: ChessGame,
+    title: str = None,
+    description: str = None,
+) -> tuple[discord.Embed, discord.File]:
+    """Возвращает (embed, file) — embed ссылается на attachment://board.png."""
+    turn    = "Белые" if game.board.turn == chess.WHITE else "Чёрные"
+    turn_id = game.white_id if game.board.turn == chess.WHITE else game.black_id
 
     if game.vs_bot and game.board.turn == chess.BLACK:
         turn_str = f"{turn} (🤖 бот)"
@@ -186,7 +282,7 @@ def build_embed(game: ChessGame, title: str = None, description: str = None) -> 
 
     color = 0xf0d9b5 if game.board.turn == chess.WHITE else 0xb58863
     embed = discord.Embed(title=title or "♟️ Шахматы", color=color)
-    embed.add_field(name="Доска", value=f"```\n{board_str}\n```", inline=False)
+    embed.set_image(url="attachment://board.png")
 
     info = [f"**Ход:** {turn_str}"]
     if game.last_move:
@@ -202,7 +298,9 @@ def build_embed(game: ChessGame, title: str = None, description: str = None) -> 
     if description:
         embed.add_field(name="Сообщение", value=description, inline=False)
     embed.set_footer(text="/chess move e2e4 — сделать ход  |  /chess resign — сдаться")
-    return embed
+
+    board_file = render_board_image(game.board, game.last_move)
+    return embed, board_file
 
 
 # ==========================================================
@@ -644,8 +742,8 @@ class Chess(commands.Cog):
         else:
             desc = f"<@{user.id}> (белые) ⚔️ <@{black_id}> (чёрные)"
 
-        embed = build_embed(game, title="♟️ Новая партия!", description=desc)
-        await channel.send(embed=embed)
+        embed, board_file = build_embed(game, title="♟️ Новая партия!", description=desc)
+        await channel.send(embed=embed, file=board_file)
         await interaction.followup.send(f"✅ Партия начата в {channel.mention}", ephemeral=True)
 
     # -------------------------------------------------------
@@ -716,12 +814,12 @@ class Chess(commands.Cog):
                 )
                 return
 
-            embed = build_embed(game)
-            await interaction.followup.send(embed=embed)
+            embed, board_file = build_embed(game)
+            await interaction.followup.send(embed=embed, file=board_file)
         else:
-            next_id = game.black_id if game.board.turn == chess.BLACK else game.white_id
-            embed   = build_embed(game, description=f"Ход <@{next_id}>")
-            await interaction.response.send_message(embed=embed)
+            next_id           = game.black_id if game.board.turn == chess.BLACK else game.white_id
+            embed, board_file = build_embed(game, description=f"Ход <@{next_id}>")
+            await interaction.response.send_message(embed=embed, file=board_file)
 
     # -------------------------------------------------------
     # Завершение партии
@@ -756,12 +854,12 @@ class Chess(commands.Cog):
                 black_outcome = {"win": "loss", "loss": "win", "draw": "draw"}[outcome]
                 record_result(game.black_id, mode, black_outcome)
 
-        embed = build_embed(game, title="🏁 Игра завершена!", description=result_text)
+        embed, board_file = build_embed(game, title="🏁 Игра завершена!", description=result_text)
 
         if followup:
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, file=board_file)
         else:
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, file=board_file)
 
         await asyncio.sleep(5)
         await cleanup_game(self.bot, game)
