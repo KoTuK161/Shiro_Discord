@@ -17,18 +17,14 @@ DATA_FILE = Path("/app/data/adm_panel.json")
 # Пользователи с доступом к /adm_* командам
 # Замени на свои реальные ID
 # ==========================================================
-RANK_LIST_ADMINS = {
-    629953087586566164,
-    111111111111111111,
-    222222222222222222,
-}
+# Суперадмин — всегда имеет доступ на всех серверах
+SUPERADMIN_ID = 629953087586566164
 
 # ==========================================================
 # Дефолтные значения для новых серверов
 # ==========================================================
 DEFAULTS = {
     "rank_channel_id":      None,   # ALLOWED_CHANNELS для /rank, /rankuid и т.д.
-    "map_channel_id":       None,   # ALLOWED_CHANNELS для /map
     "rank_list_channel_id": None,   # канал топ-листа
     "rank_list_delay":      900,    # интервал обновления топ-листа в секундах
     "shiro_react":          True,   # реакция бота на слова
@@ -81,8 +77,17 @@ def delete_guild_value(guild_id: int | str, key: str):
 # Проверка прав
 # ==========================================================
 
+def get_guild_admins(guild_id) -> set:
+    """Возвращает множество ID локальных админов сервера."""
+    d    = load_panel()
+    cfg  = d.get(str(guild_id), {})
+    return set(cfg.get("admins", []))
+
+
 async def check_admin(interaction: discord.Interaction) -> bool:
-    if interaction.user.id in RANK_LIST_ADMINS:
+    if interaction.user.id == SUPERADMIN_ID:
+        return True
+    if interaction.user.id in get_guild_admins(interaction.guild_id):
         return True
     await interaction.response.send_message(
         "❌ У тебя нет доступа к этой команде.", ephemeral=True
@@ -99,6 +104,39 @@ class AdmPanel(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------
+    # /adm_id — добавить/удалить локального администратора
+    # -------------------------------------------------------
+
+    @app_commands.command(name="adm_id", description="Добавить или удалить администратора бота на этом сервере")
+    @app_commands.describe(user="Пользователь Discord")
+    async def adm_id(self, interaction: discord.Interaction, user: discord.Member):
+        # Только суперадмин может управлять локальными админами
+        if interaction.user.id != SUPERADMIN_ID:
+            await interaction.response.send_message("❌ Только суперадмин может управлять администраторами.", ephemeral=True)
+            return
+
+        d   = load_panel()
+        gid = str(interaction.guild_id)
+        if gid not in d:
+            d[gid] = {}
+        admins = set(d[gid].get("admins", []))
+
+        if user.id in admins:
+            admins.discard(user.id)
+            d[gid]["admins"] = list(admins)
+            save_panel(d)
+            await interaction.response.send_message(
+                f"🗑️ {user.mention} удалён из администраторов бота на этом сервере.", ephemeral=True
+            )
+        else:
+            admins.add(user.id)
+            d[gid]["admins"] = list(admins)
+            save_panel(d)
+            await interaction.response.send_message(
+                f"✅ {user.mention} добавлен в администраторы бота на этом сервере.", ephemeral=True
+            )
+
+        # -------------------------------------------------------
     # /adm_help
     # -------------------------------------------------------
 
@@ -113,6 +151,8 @@ class AdmPanel(commands.Cog):
         )
         embed.add_field(name="/adm_help",
             value="Показать это сообщение.", inline=False)
+        embed.add_field(name="/adm_id @пользователь",
+            value="Добавить или удалить локального администратора бота на этом сервере. Только для суперадмина.", inline=False)
         embed.add_field(name="/adm_shiro_react_on",
             value="Включить реакцию бота на ключевые слова (img/gif).", inline=False)
         embed.add_field(name="/adm_shiro_react_off",
@@ -123,8 +163,6 @@ class AdmPanel(commands.Cog):
             value="Изменить интервал обновления топ-листа (в секундах). По умолчанию: 900.", inline=False)
         embed.add_field(name="/adm_rank_id <id>",
             value="Установить ID канала для команд /rank, /rankuid, /rankds, /unrank. Повторный ввод того же ID — удалит настройку.", inline=False)
-        embed.add_field(name="/adm_map_id <id>",
-            value="Установить ID канала для команды /map. Повторный ввод того же ID — удалит настройку.", inline=False)
         embed.set_footer(text="Все команды /adm_* доступны только администраторам.")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -181,10 +219,6 @@ class AdmPanel(commands.Cog):
             await interaction.response.send_message("❌ Минимальный интервал — 60 секунд.", ephemeral=True)
             return
         set_guild_value(interaction.guild_id, "rank_list_delay", seconds)
-        # Перезапускаем задачу в rank cog если она есть
-        rank_cog = self.bot.cogs.get("Rank")
-        if rank_cog:
-            rank_cog.restart_updater()
         await interaction.response.send_message(
             f"✅ Интервал обновления топ-листа: **{seconds} сек** ({seconds//60} мин).", ephemeral=True
         )
@@ -210,26 +244,20 @@ class AdmPanel(commands.Cog):
             set_guild_value(interaction.guild_id, "rank_channel_id", new_id)
             await interaction.response.send_message(f"✅ Канал для rank-команд установлен: <#{new_id}>", ephemeral=True)
 
-    # -------------------------------------------------------
-    # /adm_map_id
-    # -------------------------------------------------------
-
-    @app_commands.command(name="adm_map_id", description="Установить канал для команды /map")
-    @app_commands.describe(channel_id="ID канала (повторный ввод того же ID удалит настройку)")
-    async def adm_map_id(self, interaction: discord.Interaction, channel_id: str):
-        if not await check_admin(interaction):
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        """При добавлении бота на сервер — выдаём админку владельцу."""
+        if not guild.owner_id:
             return
-        if not channel_id.isdigit():
-            await interaction.response.send_message("❌ ID должен состоять только из цифр.", ephemeral=True)
-            return
-        cfg = get_guild_cfg(interaction.guild_id)
-        new_id = int(channel_id)
-        if cfg.get("map_channel_id") == new_id:
-            delete_guild_value(interaction.guild_id, "map_channel_id")
-            await interaction.response.send_message("🗑️ Настройка канала для /map **удалена**.", ephemeral=True)
-        else:
-            set_guild_value(interaction.guild_id, "map_channel_id", new_id)
-            await interaction.response.send_message(f"✅ Канал для /map установлен: <#{new_id}>", ephemeral=True)
+        d   = load_panel()
+        gid = str(guild.id)
+        if gid not in d:
+            d[gid] = {}
+        admins = set(d[gid].get("admins", []))
+        if guild.owner_id not in admins:
+            admins.add(guild.owner_id)
+            d[gid]["admins"] = list(admins)
+            save_panel(d)
 
 
 async def setup(bot: commands.Bot):
