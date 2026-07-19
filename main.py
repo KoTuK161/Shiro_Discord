@@ -147,6 +147,15 @@ async def on_ready():
         log.info(f" - {cmd.name}")
     log.info(f"Всего синхронизировано: {len(synced)}")
 
+    # Принудительная синхронизация команд для всех серверов
+    for g in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=g)
+            await bot.tree.sync(guild=g)
+            log.info(f"Команды синхронизированы для сервера: {g.name} ({g.id})")
+        except Exception as e:
+            log.error(f"Ошибка синхронизации для сервера {g.name} ({g.id}): {e}")
+
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Game("Играет в шахматы")
@@ -158,6 +167,17 @@ async def on_ready():
         log.info("voice_keep_alive запущен")
 
     log.info("=" * 60)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """При добавлении бота на новый сервер — сразу синхронизируем команды."""
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+        log.info(f"Команды синхронизированы для нового сервера: {guild.name} ({guild.id})")
+    except Exception as e:
+        log.error(f"Ошибка синхронизации для нового сервера {guild.name} ({guild.id}): {e}")
 
 
 async def reply_with_image(message: discord.Message, text: str, image_key: str):
