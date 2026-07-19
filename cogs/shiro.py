@@ -1,18 +1,17 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+import aiohttp
 
 # ==========================================================
-# ID пользователя @jiehubblu_kot — единственный владелец /shiro
-# Замени на реальный Discord ID пользователя
+# НАСТРОЙКИ
 # ==========================================================
+
 SHIRO_OWNER_ID = 629953087586566164
 
-# ID упоминаемого пользователя в команде !бан
-BAN_TARGET_ID = 629953087586566164
+BAN_TARGET_ID  = 629953087586566164
 
-# Ссылка на изображение для команды !бан
-BAN_IMAGE_URL = "https://cdn.discordapp.com/attachments/1265754689643872359/1522697173731639316/35da5b7c8763e53eeb538822e0558157.png"
+BAN_IMAGE_URL  = "https://cdn.discordapp.com/attachments/1265754689643872359/1522697173731639316/35da5b7c8763e53eeb538822e0558157.png"
 
 
 class Shiro(commands.Cog):
@@ -20,7 +19,7 @@ class Shiro(commands.Cog):
         self.bot = bot
 
     # ==========================================================
-    # !бан — префиксная команда
+    # !бан
     # ==========================================================
 
     @commands.command(name="бан")
@@ -33,25 +32,53 @@ class Shiro(commands.Cog):
         await ctx.send(embed=embed)
 
     # ==========================================================
-    # /shiro {text} — слэш-команда только для владельца
+    # /shiro — текст и/или файл от имени бота
     # ==========================================================
 
     @app_commands.command(name="shiro", description="Написать от имени бота")
-    @app_commands.describe(text="Текст, который напишет бот")
-    async def shiro_cmd(self, interaction: discord.Interaction, text: str):
-        # Проверяем ID пользователя — жёстко, без привязки к роли
+    @app_commands.describe(
+        text="Текст сообщения (необязательно если прикрепляешь файл)",
+        attachment="Картинка или файл (необязательно)"
+    )
+    async def shiro_cmd(
+        self,
+        interaction: discord.Interaction,
+        text: str = None,
+        attachment: discord.Attachment = None
+    ):
         if interaction.user.id != SHIRO_OWNER_ID:
             await interaction.response.send_message(
                 "❌ У тебя нет доступа к этой команде.",
-                ephemeral=True  # видит только сам пользователь
+                ephemeral=True
             )
             return
 
-        # Отправляем текст от имени бота в тот же канал
-        await interaction.channel.send(text)
+        if not text and not attachment:
+            await interaction.response.send_message(
+                "❌ Укажи текст или прикрепи файл.",
+                ephemeral=True
+            )
+            return
 
-        # Подтверждение — видит только вызвавший, сразу исчезает
         await interaction.response.send_message("✅", ephemeral=True)
+
+        # Скачиваем файл если есть
+        file = None
+        if attachment:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(attachment.url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        file = discord.File(
+                            fp=__import__('io').BytesIO(data),
+                            filename=attachment.filename
+                        )
+
+        # Отправляем с файлом или без
+        if file:
+            await interaction.channel.send(content=text or None, file=file)
+        else:
+            await interaction.channel.send(content=text or None)
 
 
 async def setup(bot: commands.Bot):
