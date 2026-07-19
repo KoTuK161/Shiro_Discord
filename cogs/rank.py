@@ -10,17 +10,33 @@ log = logging.getLogger(__name__)
 
 API_KEY = os.getenv("APEX_API_KEY")
 API_URL = "https://api.mozambiquehe.re/bridge"
+MAP_API_URL = "https://api.mozambiquehe.re/maprotation"
 BASE    = Path(__file__).resolve().parent.parent
 DATA    = BASE / "data"
 DATA.mkdir(exist_ok=True)
 USERS   = DATA / "apex_users.json"
 CACHE   = {}
+MAP_CACHE = {"data": None, "ts": 0}
 TTL     = 60
+MAP_CACHE_TTL = 60
 PRED_CACHE = {"data": None, "ts": 0}
 PRED_TTL   = 300
 MSK = timezone(timedelta(hours=3))
 
-RANK_LIST_DELETE_LAST = 5
+RANK_LIST_DELETE_LAST = 10
+
+# Ротация карт
+MAPS = ["E-District", "Storm Point", "World's Edge"]
+MAP_EMOJI = {
+    "E-District":   "🏙️",
+    "Storm Point":  "⛈️",
+    "World's Edge": "🌋",
+    "Kings Canyon": "🏜️",
+    "Olympus":      "🌿",
+    "Broken Moon":  "🌙",
+}
+MAP_ROTATION = timedelta(hours=4, minutes=30)
+MAP_SCHEDULE_SLOTS = 6
 
 RANK_EMOJI = {
     "Apex Predator": "<:apexpredator1:1262965581448216597>",
@@ -52,14 +68,9 @@ RANK_EMOJI = {
 }
 
 COLORS = {
-    "Rookie":        0x808080,
-    "Bronze":        0xcd7f32,
-    "Silver":        0xc0c0c0,
-    "Gold":          0xffd700,
-    "Platinum":      0x00c8c8,
-    "Diamond":       0x4aa3ff,
-    "Master":        0x9b59b6,
-    "Apex Predator": 0xff0000,
+    "Rookie": 0x808080, "Bronze": 0xcd7f32, "Silver": 0xc0c0c0,
+    "Gold": 0xffd700, "Platinum": 0x00c8c8, "Diamond": 0x4aa3ff,
+    "Master": 0x9b59b6, "Apex Predator": 0xff0000,
 }
 
 RANK_THUMBNAIL = {
@@ -83,25 +94,41 @@ RANKS = [
     ("Master",      16000),
 ]
 
+ADM_PANEL_PATH = Path("/app/data/adm_panel.json")
+ADM_DEFAULTS = {
+    "rank_channel_id":      None,
+    "map_channel_id":       None,
+    "rank_list_channel_id": None,
+    "rank_list_delay":      900,
+    "shiro_react":          True,
+}
+SUPERADMIN_ID = 629953087586566164
+
 # ==========================================================
-# Вспомогательные функции
+# Утилиты
 # ==========================================================
 
 def load_panel() -> dict:
-    from adm_panel import DATA_FILE
-    if DATA_FILE.exists():
+    if ADM_PANEL_PATH.exists():
         try:
-            return json.loads(DATA_FILE.read_text("utf-8"))
+            return json.loads(ADM_PANEL_PATH.read_text("utf-8"))
         except Exception:
             pass
     return {}
 
 
 def get_guild_cfg(guild_id) -> dict:
-    from adm_panel import DEFAULTS
     d = load_panel()
     cfg = d.get(str(guild_id), {})
-    return {**DEFAULTS, **cfg}
+    return {**ADM_DEFAULTS, **cfg}
+
+
+def is_admin(user_id: int, guild_id: int) -> bool:
+    if user_id == SUPERADMIN_ID:
+        return True
+    d = load_panel()
+    admins = d.get(str(guild_id), {}).get("admins", [])
+    return user_id in admins
 
 
 def load_users() -> dict:
@@ -164,8 +191,8 @@ def parse_rank(r: dict, rp: int, pred_threshold: int = None):
         rank_name = "Master"
         tier      = "Master"
         if pred_threshold is not None:
-            needed  = pred_threshold - rp
-            pos_str = f" · В топе: **#{ladder_pos}**" if ladder_pos else ""
+            needed   = pred_threshold - rp
+            pos_str  = f" · В топе: **#{ladder_pos}**" if ladder_pos else ""
             next_str = f"**До ранга Predator:** {needed} RP{pos_str}" if needed > 0 else f"Достаточно для Predator!{pos_str}"
         else:
             pos_str  = f"** · В топе:** #{ladder_pos}" if ladder_pos else ""
@@ -231,6 +258,52 @@ async def fetch_predator_threshold() -> int | None:
     return None
 
 
+async def fetch_map_rotation() -> dict | None:
+    now = time.time()
+    if MAP_CACHE["data"] and now - MAP_CACHE["ts"] < MAP_CACHE_TTL:
+        return MAP_CACHE["data"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                MAP_API_URL,
+                params={"auth": API_KEY, "version": 2},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status != 200:
+                    return None
+                data = await r.json()
+                MAP_CACHE["data"] = data
+                MAP_CACHE["ts"]   = now
+                return data
+    except Exception:
+        return None
+
+
+def round_to_half_hour(dt: datetime) -> datetime:
+    """Округляет время до ближайших :00 или :30."""
+    minute = dt.minute
+    if minute < 15:
+        # Округляем вниз до :00
+        return dt.replace(minute=0, second=0, microsecond=0)
+    elif minute < 45:
+        # Округляем до :30
+        return dt.replace(minute=30, second=0, microsecond=0)
+    else:
+        # Округляем вверх до следующего :00
+        return (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+
+def build_map_schedule(current_name: str, slot_end: datetime) -> str:
+    idx = MAPS.index(current_name) if current_name in MAPS else -1
+    lines = []
+    for i in range(1, MAP_SCHEDULE_SLOTS + 1):
+        future_name  = MAPS[(idx + i) % len(MAPS)]
+        future_start = round_to_half_hour(slot_end + MAP_ROTATION * (i - 1))
+        emoji = MAP_EMOJI.get(future_name, "🗺️")
+        lines.append(f"{future_start.strftime('%H:%M %d.%m')} — {emoji} {future_name}")
+    return "\n".join(lines)
+
+
 async def send_and_delete(interaction, delay=86400, **kwargs):
     msg = await interaction.followup.send(**kwargs)
     async def _delete():
@@ -259,51 +332,94 @@ async def check_channel(interaction: discord.Interaction) -> bool:
 
 class Rank(commands.Cog):
     def __init__(self, bot):
-        self.bot = bot
-        self._enabled: dict[int, bool] = {}  # guild_id -> bool
-        self.rank_list_updater.start()
+        self.bot  = bot
+        self._enabled: dict[int, bool] = {}
+        self._loop_task: asyncio.Task | None = None
+
+    def cog_load(self):
+        self._loop_task = asyncio.create_task(self._run_rank_list_loop())
 
     def cog_unload(self):
-        self.rank_list_updater.cancel()
-
-    def restart_updater(self):
-        """Вызывается из adm_panel при изменении интервала."""
-        self.rank_list_updater.restart()
+        if self._loop_task:
+            self._loop_task.cancel()
 
     # -------------------------------------------------------
     # Авто-обновление топ-листа
     # -------------------------------------------------------
 
-    @tasks.loop(seconds=60)
-    async def rank_list_updater(self):
-        for guild in self.bot.guilds:
-            gid = guild.id
-            if not self._enabled.get(gid, True):
-                continue
-            cfg     = get_guild_cfg(gid)
-            chan_id = cfg.get("rank_list_channel_id")
-            if not chan_id:
-                continue
-            channel = self.bot.get_channel(int(chan_id))
-            if not channel:
-                continue
-            await self._post_rank_list(channel, gid)
-
-    @rank_list_updater.before_loop
-    async def before_updater(self):
+    async def _run_rank_list_loop(self):
         await self.bot.wait_until_ready()
-
-    @rank_list_updater.error
-    async def updater_error(self, error):
-        log.error(f"[rank_list_updater] {error}")
+        last_post: dict[int, float] = {}
+        while not self.bot.is_closed():
+            for guild in self.bot.guilds:
+                gid = guild.id
+                if not self._enabled.get(gid, True):
+                    continue
+                cfg     = get_guild_cfg(gid)
+                chan_id = cfg.get("rank_list_channel_id")
+                if not chan_id:
+                    continue
+                delay = int(cfg.get("rank_list_delay") or 900)
+                now   = time.time()
+                if now - last_post.get(gid, 0) < delay:
+                    continue
+                channel = self.bot.get_channel(int(chan_id))
+                if not channel:
+                    continue
+                try:
+                    await self._post_rank_list(channel, gid)
+                    last_post[gid] = time.time()
+                except Exception as e:
+                    log.error(f"[rank_list_loop] {e}")
+            await asyncio.sleep(30)
 
     async def _post_rank_list(self, channel: discord.TextChannel, guild_id: int):
-        d          = load_users()
-        gid        = str(guild_id)
+        d           = load_users()
+        gid         = str(guild_id)
         guild_users = [v for v in d.values() if v.get("guild_id") == gid]
+
+        # Получаем ротацию карт
+        map_data     = await fetch_map_rotation()
+        map_section  = ""
+        if map_data:
+            br = map_data.get("ranked", {})
+            current      = br.get("current", {})
+            current_name = current.get("map", "Неизвестно")
+            remaining_sec = current.get("remainingMins", 0) * 60
+            h, rem = divmod(max(remaining_sec, 0), 3600)
+            m, s   = divmod(rem, 60)
+            time_str = f"{h}ч {m:02d}м {s:02d}с" if h > 0 else f"{m}м {s:02d}с"
+            slot_end = datetime.now(MSK) + timedelta(seconds=remaining_sec)
+            schedule = build_map_schedule(current_name, slot_end)
+            cur_emoji = MAP_EMOJI.get(current_name, "🗺️")
+            map_section = (
+                f"**🗺️ Текущая карта:** {cur_emoji} {current_name}\n"
+                f"**⏱️ До смены:** {time_str}\n\n"
+                f"**📅 Расписание:**\n```{schedule}```"
+            )
+
         if not guild_users:
+            if map_section:
+                now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M МСК")
+                embed = discord.Embed(
+                    title="🗺️ Ротация карт Apex Legends (Ranked)",
+                    description=map_section,
+                    color=0x3498db
+                )
+                embed.set_footer(text=f"Обновлено: {now_msk}")
+                try:
+                    async for msg in channel.history(limit=RANK_LIST_DELETE_LAST):
+                        try:
+                            await msg.delete()
+                            await asyncio.sleep(0.3)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                await channel.send(embed=embed)
             return
 
+        # Строим топ игроков
         players = []
         for u in guild_users:
             discord_id = u.get("discord_id")
@@ -311,7 +427,7 @@ class Rank(commands.Cog):
             data       = await self._fetch(uid=u["uid"]) if u.get("uid") else await self._fetch(player=u.get("ea_name"))
 
             if "error" in data:
-                players.append({"mention": mention, "ea_name": u.get("ea_name","?"), "rank_str": "❓ Нет данных", "rp": -1})
+                players.append({"mention": mention, "ea_name": u.get("ea_name", "?"), "rank_str": "❓ Нет данных", "rp": -1})
             else:
                 try:
                     rp      = int(data["global"]["rank"].get("rankScore", 0))
@@ -319,24 +435,34 @@ class Rank(commands.Cog):
                     ea_name = get_display_name(u, data)
                     players.append({"mention": mention, "ea_name": ea_name, "rank_str": format_rank_str(r_block, rp), "rp": rp})
                 except Exception:
-                    players.append({"mention": mention, "ea_name": u.get("ea_name","?"), "rank_str": "❓ Ошибка", "rp": -1})
+                    players.append({"mention": mention, "ea_name": u.get("ea_name", "?"), "rank_str": "❓ Ошибка", "rp": -1})
 
         players.sort(key=lambda x: x["rp"], reverse=True)
 
-        lines = [
+        rank_lines = [
             f"**#{i}** {p['mention']}\nНик: **{p['ea_name']}**\nРанг: {p['rank_str']}"
             for i, p in enumerate(players, 1)
         ]
 
         now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M МСК")
-        embed   = discord.Embed(title="🏆 Ranked список сервера", description="\n\n".join(lines), color=0x3498db)
+
+        # Один embed: топ + карты
+        description = "\n\n".join(rank_lines)
+        if map_section:
+            description += f"\n\n{'─' * 30}\n\n{map_section}"
+
+        embed = discord.Embed(
+            title="🏆 Ranked список сервера",
+            description=description,
+            color=0x3498db
+        )
         embed.set_footer(text=f"Всего игроков: {len(players)} · Обновлено: {now_msk}")
 
         try:
             async for msg in channel.history(limit=RANK_LIST_DELETE_LAST):
                 try:
                     await msg.delete()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
                 except Exception:
                     pass
         except Exception as e:
@@ -400,7 +526,6 @@ class Rank(commands.Cog):
         ingame_str = "🎮 В игре" if is_in_game else "🏠 В лобби"
         party_str  = "🔒 Заполнено" if party_full else "🔓 Есть место"
 
-        label = "📈" if tier not in ("Apex Predator", "Master") else "📈"
         next_label = "До следующего ранга:" if tier not in ("Apex Predator", "Master") else ""
 
         desc = (
@@ -434,8 +559,8 @@ class Rank(commands.Cog):
             await send_and_delete(interaction, content="❌ " + m.get(data["error"], f"HTTP {data['error']}"))
             return
         try:
-            ea_name = data["global"].get("name", nick)
-            uid     = str(data["global"].get("uid", ""))
+            ea_name   = data["global"].get("name", nick)
+            uid       = str(data["global"].get("uid", ""))
             self.register_user(interaction.user, interaction.guild_id, ea_name, uid)
             entry     = load_users().get(f"{interaction.user.id}:{interaction.guild_id}", {})
             saved_uid = str(entry.get("uid", "")).strip()
@@ -454,7 +579,7 @@ class Rank(commands.Cog):
         await interaction.response.defer()
         if not uid.isdigit():
             await send_and_delete(interaction,
-                content="❌ UID должен быть числовым.\n\n1. Зайди на https://apexlegendsstatus.com\n2. Найди профиль по нику\n3. В URL будет `/profile/uid/PC/1234567890`")
+                content="❌ UID должен быть числовым EA-идентификатором.\n\n1. Зайди на https://apexlegendsstatus.com\n2. Найди профиль по нику\n3. В URL будет `/profile/uid/PC/1234567890`")
             return
         data = await self.fetch(uid=uid)
         if "error" in data:
@@ -504,17 +629,19 @@ class Rank(commands.Cog):
 
     @app_commands.command(name="rank_list_on", description="Включить автообновление топ-листа")
     async def rank_list_on(self, interaction: discord.Interaction):
-        from adm_panel import check_admin
-        if not await check_admin(interaction): return
+        if not is_admin(interaction.user.id, interaction.guild_id):
+            await interaction.response.send_message("❌ У тебя нет доступа.", ephemeral=True)
+            return
         self._enabled[interaction.guild_id] = True
-        if not self.rank_list_updater.is_running():
-            self.rank_list_updater.start()
+        if self._loop_task is None or self._loop_task.done():
+            self._loop_task = asyncio.create_task(self._run_rank_list_loop())
         await interaction.response.send_message("✅ Автообновление топ-листа **включено**.", ephemeral=True)
 
     @app_commands.command(name="rank_list_off", description="Выключить автообновление топ-листа")
     async def rank_list_off(self, interaction: discord.Interaction):
-        from adm_panel import check_admin
-        if not await check_admin(interaction): return
+        if not is_admin(interaction.user.id, interaction.guild_id):
+            await interaction.response.send_message("❌ У тебя нет доступа.", ephemeral=True)
+            return
         self._enabled[interaction.guild_id] = False
         await interaction.response.send_message("⛔ Автообновление топ-листа **выключено**.", ephemeral=True)
 
