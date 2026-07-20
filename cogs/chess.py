@@ -201,11 +201,11 @@ def _load_piece(name: str) -> Optional[Image.Image]:
 # шрифты установлены в контейнере.
 # ==========================================================
 
-COORDS_DIR = Path("/app/coords")   # папка с PNG для a-h и 1-8
+COORDS_DIR = Path("/app/pieces")   # папка с PNG для a-h и 1-8
 
 # Высота глифа координаты в пикселях — ширина подстраивается
 # автоматически, чтобы не искажать пропорции символа.
-COORD_GLYPH_HEIGHT = int(BORDER * 0.85)
+COORD_GLYPH_HEIGHT = int(BORDER * 0.8)
 
 _coord_cache: dict[str, Image.Image] = {}
 
