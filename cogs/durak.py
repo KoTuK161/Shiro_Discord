@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # ==========================================================
 
 CATEGORY_NAME = "🃏 ДУРАК 🃏"
-CARDS_DIR     = Path("/app/cards")
+CARDS_DIR     = Path("/app/img/cards/basic")
 STATS_FILE    = Path("/app/data/durak_stats.json")
 GAMES_FILE    = Path("/app/data/durak_games.json")
 
@@ -286,8 +286,12 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     """
     hand      = game.hands.get(viewer_id, [])
     n_table   = max(len(game.table_attack), 1)
-    table_w   = n_table * (CARD_W + PADDING) + PADDING
-    img_w     = max(table_w, 800)
+
+    # Ширина: берём максимум из: стол+место_для_колоды, рука игрока, минимум 600
+    table_min_w = n_table * (CARD_W + PADDING) + (CARD_W + PADDING) * 3 + PADDING
+    hand_min_w  = PADDING + len(hand) * (CARD_W + 6) + PADDING * 2
+    img_w     = max(table_min_w, hand_min_w, 600)
+
     img_h     = CARD_H * 4 + PADDING * 6 + 60  # opponents / table / deck row / own hand
 
     img  = Image.new("RGB", (img_w, img_h), COLOR_TABLE)
@@ -305,8 +309,14 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     opp_x = PADDING
     for opp in opponents:
         opp_hand  = game.hands.get(opp, [])
-        role      = "⚔️" if opp == game.attacker_id else ("🛡️" if opp == game.defender_id else "")
-        name_text = f"{role} Игрок {abs(opp) % 10000} ({len(opp_hand)} карт)"
+        if opp == game.attacker_id:
+            role = "[АТК]"
+        elif opp == game.defender_id:
+            role = "[ЗАЩ]"
+        else:
+            role = ""
+        name_label = "Бот" if game.is_bot(opp) else f"Игрок {abs(opp) % 10000}"
+        name_text = f"{role} {name_label} ({len(opp_hand)} карт)".strip()
         draw.text((opp_x, PADDING), name_text, fill=COLOR_HINT, font=fn)
         for i, _ in enumerate(opp_hand[:10]):
             x = opp_x + i * (CARD_OVERLAP // 2)
@@ -363,8 +373,12 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     # Рука игрока снизу
     # ----------------------------------------------------------
     hand_y    = img_h - CARD_H - PADDING
-    role_self = "⚔️ Атакуете" if viewer_id == game.attacker_id else (
-                "🛡️ Защищаетесь" if viewer_id == game.defender_id else "Ваш ход позже")
+    if viewer_id == game.attacker_id:
+        role_self = "Атакуете"
+    elif viewer_id == game.defender_id:
+        role_self = "Защищаетесь"
+    else:
+        role_self = "Ваш ход позже"
     draw.text((PADDING, hand_y - 22), f"Ваши карты: {role_self}", fill=COLOR_HINT, font=fn)
 
     for i, card in enumerate(hand):
@@ -506,7 +520,7 @@ def build_status_embed(game: DurakGame, title: str = None, description: str = No
     else:
         hint.append("Чтобы походить: напиши номер карты — например `3`")
         hint.append("Чтобы закончить атаку: напиши `стоп`")
-    embed.set_footer(text=" | ".join(hint))
+    embed.set_footer(text=" | ".join(hint) + " | сдаюсь — выйти из игры")
     return embed
 
 
@@ -515,7 +529,7 @@ def build_status_embed(game: DurakGame, title: str = None, description: str = No
 # ==========================================================
 
 def bot_attack(game: DurakGame, bot_id: int) -> Optional[Card]:
-    """Бот выбирает карту для атаки."""
+    """Бот выбирает карту для атаки или подкидывания. Возвращает None если хочет завершить."""
     hand = game.hands[bot_id]
     if not hand:
         return None
@@ -526,10 +540,25 @@ def bot_attack(game: DurakGame, bot_id: int) -> Optional[Card]:
         pool      = non_trump if non_trump else hand
         return min(pool, key=lambda c: game.rank_values[c.rank])
 
+    # Все карты отбиты — решаем подкидывать или нет
+    all_def = all(
+        (i < len(game.table_defend) and game.table_defend[i])
+        for i in range(len(game.table_attack))
+    )
+    if all_def:
+        # Подкидываем только если есть совпадающий ранг и не слишком много карт на столе
+        if len(game.table_attack) >= 4:
+            return None  # не подкидываем — завершаем
+        ranks_on_table = {c.rank for c in game.table_attack} | {
+            c.rank for c in game.table_defend if c}
+        matching = [c for c in hand if c.rank in ranks_on_table and c.suit != game.trump]
+        if matching:
+            return min(matching, key=lambda c: game.rank_values[c.rank])
+        return None  # нечего подкидывать — завершаем
+
     # Подкидываем карту того же ранга что уже есть на столе
     ranks_on_table = {c.rank for c in game.table_attack} | {
-        c.rank for c in game.table_defend if c
-    }
+        c.rank for c in game.table_defend if c}
     matching = [c for c in hand if c.rank in ranks_on_table]
     if matching:
         return min(matching, key=lambda c: game.rank_values[c.rank])
@@ -825,6 +854,31 @@ class Durak(commands.Cog):
 
         text = message.content.strip().lower()
 
+        # Сдаться
+        if text == "сдаюсь":
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            game.losers.append(uid)
+            active = game.active_players()
+            if len(active) <= 1:
+                game.finished = True
+                await finish_game(self.bot, game, message.channel)
+                return
+            # Если сдался атакующий или защитник — переназначаем роли
+            if uid == game.attacker_id or uid == game.defender_id:
+                end_turn(game, defender_took=False)
+            save_games(active_games)
+            await send_game_state(
+                self.bot, game,
+                description=f"🏳️ <@{uid}> сдался и выбывает из игры.",
+                channel=message.channel
+            )
+            if game.is_bot(game.attacker_id):
+                await process_bot_turn(self.bot, game, message.channel)
+            return
+
         # Защитник берёт карты
         if text == "взять" and uid == game.defender_id:
             try:
@@ -1001,6 +1055,10 @@ class Durak(commands.Cog):
                 if all_def:
                     desc += "\n✅ Все карты отбиты. Атакующий может подкинуть (`номер`) или закончить (`стоп`)."
                 await send_game_state(self.bot, game, description=desc, channel=message.channel)
+
+                # Если атакующий — бот, даём ему решить подкидывать или нет
+                if all_def and game.is_bot(game.attacker_id):
+                    await process_bot_turn(self.bot, game, message.channel)
                 return
 
         # Неизвестная команда — удаляем
