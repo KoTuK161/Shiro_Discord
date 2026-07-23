@@ -28,6 +28,7 @@ CARD_H        = 130   # высота карты на столе
 CARD_OVERLAP  = 30    # перекрытие карт в руке
 PADDING       = 20    # отступы
 HAND_OFFSET   = 10    # смещение карт в руке
+HAND_NUM_OFFSET = 100  # отступ номера карты над картой в руке
 
 # Цвета стола
 COLOR_TABLE   = ( 53, 101,  77)   # зелёный стол
@@ -42,7 +43,9 @@ COLOR_DEFEND  = ( 80, 200, 255)
 # ==========================================================
 
 SUITS      = ["clubs", "diamonds", "hearts", "spades"]
-SUIT_SYM   = {"clubs": "♣", "diamonds": "♦", "hearts": "♥", "spades": "♠"}
+SUIT_SYM    = {"clubs": "♣", "diamonds": "♦", "hearts": "♥", "spades": "♠"}
+# ASCII-замены для PIL (fallback-шрифты не знают Unicode-символы мастей)
+SUIT_LETTER = {"clubs": "C", "diamonds": "D", "hearts": "H", "spades": "S"}
 RANKS_36   = ["6", "7", "8", "9", "10", "jack", "queen", "king", "ace"]
 RANKS_52   = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "jack", "queen", "king", "ace"]
 
@@ -67,6 +70,10 @@ class Card:
 
     def display(self) -> str:
         return f"{RANK_DISPLAY[self.rank]}{SUIT_SYM[self.suit]}"
+
+    def display_img(self) -> str:
+        """ASCII-safe display для PIL (буква масти вместо символа)."""
+        return f"{RANK_DISPLAY[self.rank]}{SUIT_LETTER[self.suit]}"
 
     def beats(self, other: "Card", trump: str, rank_values: dict) -> bool:
         """Может ли эта карта побить другую."""
@@ -286,18 +293,14 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     """
     hand      = game.hands.get(viewer_id, [])
     n_table   = max(len(game.table_attack), 1)
-
-    # Ширина: берём максимум из: стол+место_для_колоды, рука игрока, минимум 600
-    table_min_w = n_table * (CARD_W + PADDING) + (CARD_W + PADDING) * 3 + PADDING
-    hand_min_w  = PADDING + len(hand) * (CARD_W + 6) + PADDING * 2
-    img_w     = max(table_min_w, hand_min_w, 600)
-
-    img_h     = CARD_H * 4 + PADDING * 6 + 60  # opponents / table / deck row / own hand
+    table_w   = n_table * (CARD_W + PADDING) + PADDING
+    img_w     = max(table_w, 800)
+    img_h     = CARD_H * 4 + PADDING * 6 + 60 + HAND_NUM_OFFSET + 60  # opponents / table / deck row / own hand + number labels + hand title
 
     img  = Image.new("RGB", (img_w, img_h), COLOR_TABLE)
     draw = ImageDraw.Draw(img)
-    fn   = _font(16)
-    fn_s = _font(13)
+    fn   = _font(60)
+    fn_s = _font(50)
     back = _load_back()
 
     active = game.active_players()
@@ -309,14 +312,9 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     opp_x = PADDING
     for opp in opponents:
         opp_hand  = game.hands.get(opp, [])
-        if opp == game.attacker_id:
-            role = "[АТК]"
-        elif opp == game.defender_id:
-            role = "[ЗАЩ]"
-        else:
-            role = ""
-        name_label = "Бот" if game.is_bot(opp) else f"Игрок {abs(opp) % 10000}"
-        name_text = f"{role} {name_label} ({len(opp_hand)} карт)".strip()
+        role      = "[ATK]" if opp == game.attacker_id else ("[DEF]" if opp == game.defender_id else "")
+        name_label = "Bot" if game.is_bot(opp) else "Player"
+        name_text  = f"{role} {name_label} ({len(opp_hand)})".strip()
         draw.text((opp_x, PADDING), name_text, fill=COLOR_HINT, font=fn)
         for i, _ in enumerate(opp_hand[:10]):
             x = opp_x + i * (CARD_OVERLAP // 2)
@@ -331,7 +329,7 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     # Стол (атака + защита)
     # ----------------------------------------------------------
     table_y = CARD_H + PADDING * 3 + 22
-    draw.text((PADDING, table_y - 22), "Стол:", fill=COLOR_TEXT, font=fn)
+    draw.text((PADDING, table_y - 22), "Table:", fill=COLOR_TEXT, font=fn)
 
     for i, atk_card in enumerate(game.table_attack):
         x = PADDING + i * (CARD_W + PADDING)
@@ -340,7 +338,7 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
         atk_img = _load_card_img(atk_card.filename())
         if atk_img:
             img.paste(atk_img, (x, table_y), atk_img)
-        draw.text((x + 2, table_y + CARD_H + 2), atk_card.display(),
+        draw.text((x + 2, table_y + CARD_H + 2), atk_card.display_img(),
                   fill=COLOR_ATTACK, font=fn_s)
 
         # Карта защиты (если есть)
@@ -349,7 +347,7 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
             def_img = _load_card_img(def_card.filename())
             if def_img:
                 img.paste(def_img, (x + 15, table_y + 15), def_img)
-            draw.text((x + 17, table_y + CARD_H + 17), def_card.display(),
+            draw.text((x + 17, table_y + CARD_H + 17), def_card.display_img(),
                       fill=COLOR_DEFEND, font=fn_s)
 
     # ----------------------------------------------------------
@@ -361,33 +359,35 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
         if back:
             img.paste(back, (deck_x, deck_y), back)
         draw.text((deck_x, deck_y + CARD_H + 4),
-                  f"Колода: {len(game.deck)}", fill=COLOR_TEXT, font=fn_s)
+                  f"Deck: {len(game.deck)}", fill=COLOR_TEXT, font=fn_s)
     if game.trump_card:
         trump_img = _load_card_img(game.trump_card.filename())
         if trump_img:
             img.paste(trump_img, (deck_x - CARD_W - 5, deck_y), trump_img)
         draw.text((deck_x - CARD_W - 5, deck_y + CARD_H + 4),
-                  f"Козырь: {SUIT_SYM[game.trump]}", fill=COLOR_HINT, font=fn)
+                  f"Trump: {SUIT_LETTER[game.trump]}", fill=COLOR_HINT, font=fn)
 
     # ----------------------------------------------------------
     # Рука игрока снизу
     # ----------------------------------------------------------
     hand_y    = img_h - CARD_H - PADDING
     if viewer_id == game.attacker_id:
-        role_self = "Атакуете"
+        role_self = "[ATTACK]"
     elif viewer_id == game.defender_id:
-        role_self = "Защищаетесь"
+        role_self = "[DEFEND]"
     else:
-        role_self = "Ваш ход позже"
-    draw.text((PADDING, hand_y - 22), f"Ваши карты: {role_self}", fill=COLOR_HINT, font=fn)
+        role_self = "[WAIT]"
+    fn_hand_label = _font(36)
+    draw.text((PADDING, hand_y - HAND_NUM_OFFSET - 44), f"Your hand: {role_self}",
+              fill=COLOR_HINT, font=fn_hand_label)
 
     for i, card in enumerate(hand):
-        x      = PADDING + i * (CARD_W + 6)
+        x      = PADDING + i * (CARD_W + 16)
         card_i = _load_card_img(card.filename())
         if card_i:
             img.paste(card_i, (x, hand_y), card_i)
         # Номер карты для ввода хода
-        draw.text((x + CARD_W // 2, hand_y - 4), str(i + 1),
+        draw.text((x + CARD_W // 2, hand_y - HAND_NUM_OFFSET // 2), str(i + 1),
                   fill=COLOR_HINT, font=fn_s, anchor="mm")
 
     # Сохраняем
