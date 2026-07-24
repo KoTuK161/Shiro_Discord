@@ -105,6 +105,14 @@ async def voice_keep_alive_error(error):
     log.error(f"Ошибка в voice_keep_alive: {error}")
 
 # ==========================================================
+# Флаг — синхронизация команд выполняется только один раз
+# за жизнь процесса, чтобы не выжигать rate-limit Discord
+# при каждом reconnect/on_ready
+# ==========================================================
+
+_synced_once = False
+
+# ==========================================================
 # События
 # ==========================================================
 
@@ -124,47 +132,83 @@ def get_shiro_react(guild_id) -> bool:
 
 @bot.event
 async def on_ready():
+    global _synced_once
     log.info("=" * 60)
     log.info(f"Bot User: {bot.user}")
     log.info(f"Application ID: {bot.application_id}")
     log.info(f"Guild ID: {GUILD_ID}")
     log.info(f"DEBUG: {DEBUG}")
 
-    log.info("Команды в tree ДО sync:")
-    for cmd in bot.tree.get_commands():
-        log.info(f" - {cmd.name}")
+    # ----------------------------------------------------------
+    # Синхронизация команд — только один раз за жизнь процесса.
+    # При reconnect'ах on_ready вызывается повторно, но sync мы
+    # уже не трогаем — иначе Discord выдаёт rate-limit и весь
+    # блок зависает, не давая выполниться presence и voice.
+    # asyncio.wait_for ограничивает ожидание 20 сек на запрос —
+    # если Discord тормозит, мы идём дальше, а не висим вечно.
+    # ----------------------------------------------------------
+    if not _synced_once:
+        log.info("Команды в tree ДО sync:")
+        for cmd in bot.tree.get_commands():
+            log.info(f" - {cmd.name}")
 
-    if DEBUG:
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=guild)
-        synced = await bot.tree.sync()
-    else:
-        synced = await bot.tree.sync()
-
-    log.info("Команды, которые Discord принял:")
-    for cmd in synced:
-        log.info(f" - {cmd.name}")
-    log.info(f"Всего синхронизировано: {len(synced)}")
-
-    # Принудительная синхронизация команд для всех серверов
-    for g in bot.guilds:
         try:
-            bot.tree.copy_global_to(guild=g)
-            await bot.tree.sync(guild=g)
-            log.info(f"Команды синхронизированы для сервера: {g.name} ({g.id})")
+            if DEBUG:
+                # В режиме DEBUG сначала чистим guild-команды, чтобы
+                # изменения появлялись мгновенно (guild sync — моментальный)
+                dobj = discord.Object(id=GUILD_ID)
+                bot.tree.clear_commands(guild=dobj)
+                await asyncio.wait_for(bot.tree.sync(guild=dobj), timeout=20)
+                log.info(f"Guild-sync выполнен для {GUILD_ID}")
+
+            # Глобальная синхронизация (появляется у всех серверов за ~1 час)
+            synced = await asyncio.wait_for(bot.tree.sync(), timeout=20)
+            log.info("Команды, которые Discord принял:")
+            for cmd in synced:
+                log.info(f" - {cmd.name}")
+            log.info(f"Всего синхронизировано глобально: {len(synced)}")
+
+            # Принудительно копируем глобальные команды на каждый сервер,
+            # чтобы они стали доступны сразу, не дожидаясь ~1 часа.
+            # В DEBUG пропускаем GUILD_ID — он уже синхронизирован выше.
+            for g in bot.guilds:
+                if DEBUG and g.id == GUILD_ID:
+                    continue
+                try:
+                    bot.tree.copy_global_to(guild=g)
+                    await asyncio.wait_for(bot.tree.sync(guild=g), timeout=20)
+                    log.info(f"Команды синхронизированы для: {g.name} ({g.id})")
+                except Exception as e:
+                    log.error(f"Ошибка sync для {g.name} ({g.id}): {e}")
+
+            _synced_once = True
+            log.info("Синхронизация команд завершена.")
+
+        except asyncio.TimeoutError:
+            log.error("Sync команд завис (timeout 20 сек) — пропускаем, продолжаем запуск.")
         except Exception as e:
-            log.error(f"Ошибка синхронизации для сервера {g.name} ({g.id}): {e}")
+            log.error(f"Ошибка sync команд (не критично, продолжаем): {e}")
+    else:
+        log.info("Reconnect — sync команд пропускается (уже выполнен).")
 
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Game("Играет в шахматы")
-    )
+    # ----------------------------------------------------------
+    # Presence и voice выполняются ВСЕГДА — даже если sync выше
+    # упал или зависнул по таймауту.
+    # ----------------------------------------------------------
+    try:
+        await bot.change_presence(
+            status=discord.Status.online,
+            activity=discord.Game("Играет в шахматы")
+        )
+        log.info("Статус бота установлен: 'Играет в шахматы'")
+    except Exception as e:
+        log.error(f"Ошибка установки статуса: {e}")
 
-    # Запускаем фоновую задачу голосового канала
     if not voice_keep_alive.is_running():
         voice_keep_alive.start()
         log.info("voice_keep_alive запущен")
+    else:
+        log.info("voice_keep_alive уже работает (reconnect).")
 
     log.info("=" * 60)
 
