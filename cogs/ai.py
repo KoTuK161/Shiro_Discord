@@ -1,16 +1,16 @@
 import os
 import json
+import base64
 import asyncio
 import logging
 import aiohttp
+import re
 
 from pathlib import Path
 from collections import defaultdict
 
 import discord
 from discord.ext import commands
-
-import re
 
 log = logging.getLogger(__name__)
 
@@ -270,12 +270,28 @@ class AI(commands.Cog):
                 )
                 content.append({"type": "text", "text": f"[изображение '{att.filename}' пропущено — слишком большое]"})
                 continue
-            # Передаём прямую ссылку вместо base64 — намного легче
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": att.url},
-            })
-            log.info(f"[ai] user={user_id} | вложение: {att.filename} ({att.size} байт)")
+
+            # Скачиваем изображение сразу и передаём как base64.
+            # Discord CDN ссылки имеют срок жизни (expire=...) и протухают
+            # к моменту запроса к Groq — поэтому нельзя передавать URL напрямую.
+            try:
+                async with self.session.get(att.url) as img_resp:
+                    if img_resp.status != 200:
+                        log.warning(f"[ai] user={user_id} | не удалось скачать '{att.filename}': HTTP {img_resp.status}")
+                        content.append({"type": "text", "text": f"[изображение '{att.filename}' не удалось загрузить]"})
+                        continue
+                    img_bytes = await img_resp.read()
+
+                media_type = att.content_type or "image/jpeg"
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{b64}"},
+                })
+                log.info(f"[ai] user={user_id} | вложение загружено: {att.filename} ({len(img_bytes)} байт)")
+            except Exception as e:
+                log.warning(f"[ai] user={user_id} | ошибка загрузки '{att.filename}': {e}")
+                content.append({"type": "text", "text": f"[изображение '{att.filename}' не удалось загрузить: {e}]"})
 
         # Vision-модели не поддерживают длинную историю с изображениями —
         # передаём только системный промпт + текущий запрос
