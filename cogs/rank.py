@@ -77,10 +77,10 @@ RANK_THUMBNAIL = {
     "Rookie":        "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
     "Bronze":        "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
     "Silver":        "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
-    "Gold":          "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
-    "Platinum":      "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
-    "Diamond":       "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
-    "Master":        "https://cdn.discordapp.com/attachments/1265754689643872359/1522668237572280531/baje.png",
+    "Gold":          "https://cdn.discordapp.com/attachments/1265754689643872359/1533801000240939028/baje_gold.png",
+    "Platinum":      "https://cdn.discordapp.com/attachments/1265754689643872359/1533797455274053642/baje_platinum.png",
+    "Diamond":       "https://cdn.discordapp.com/attachments/1265754689643872359/1533794381717438575/baje_diamond.png",
+    "Master":        "https://cdn.discordapp.com/attachments/1265754689643872359/1533794587733262346/baje_master.png",
     "Apex Predator": "https://cdn.discordapp.com/attachments/1265754689643872359/1524881932033196173/baje_predator.png",
 }
 
@@ -303,6 +303,40 @@ def build_map_schedule(current_name: str, slot_end: datetime) -> str:
         lines.append(f"{future_start.strftime('%H:%M %d.%m')} — {emoji} {future_name}")
     return "\n".join(lines)
 
+def build_season_info(rank_data: dict) -> str:
+    try:
+        season_code = rank_data.get("rankedSeason", "")
+
+        parts = season_code.split("_")
+        season = parts[2][1:]
+        split = parts[3][1:]
+
+        meta = rank_data.get("rankedSeasonMeta", {})
+
+        end = datetime.fromtimestamp(
+            meta["end"],
+            tz=MSK
+        )
+
+        now = datetime.now(MSK)
+
+        remain = end - now
+
+        if remain.total_seconds() < 0:
+            return ""
+
+        days = remain.days
+        hours = remain.seconds // 3600
+        minutes = (remain.seconds % 3600) // 60
+
+        return (
+            f"🏆 **Сезон:** {season} • Сплит {split}\n"
+            f"⌛ **До конца сезона:** {days} д. {hours:02} ч. {minutes:02} мин.\n"
+            f"📅 **Конец сезона:** {end.strftime('%d.%m.%Y %H:%M')} МСК"
+        )
+
+    except Exception:
+        return ""
 
 async def send_and_delete(interaction, delay=86400, **kwargs):
     msg = await interaction.followup.send(**kwargs)
@@ -421,17 +455,20 @@ class Rank(commands.Cog):
 
         # Строим топ игроков
         players = []
+        season_info = ""
         for u in guild_users:
             discord_id = u.get("discord_id")
             mention    = f"<@{discord_id}>" if discord_id else u.get("discord_name", "?")
             data       = await self._fetch(uid=u["uid"]) if u.get("uid") else await self._fetch(player=u.get("ea_name"))
 
-            if "error" in data:
+            if "error" in data:    
                 players.append({"mention": mention, "ea_name": u.get("ea_name", "?"), "rank_str": "❓ Нет данных", "rp": -1})
             else:
                 try:
                     rp      = int(data["global"]["rank"].get("rankScore", 0))
                     r_block = data["global"]["rank"]
+                    if not season_info:
+                        season_info = build_season_info(r_block)
                     ea_name = get_display_name(u, data)
                     players.append({"mention": mention, "ea_name": ea_name, "rank_str": format_rank_str(r_block, rp), "rp": rp})
                 except Exception:
@@ -448,8 +485,16 @@ class Rank(commands.Cog):
 
         # Один embed: топ + карты
         description = "\n\n".join(rank_lines)
+
         if map_section:
             description += f"\n\n{'─' * 30}\n\n{map_section}"
+
+        if season_info:
+            description += (
+                f"\n"
+                f"{'─' * 30}\n\n"
+                f"{season_info}"
+            )
 
         embed = discord.Embed(
             title="🏆 Ranked список сервера",

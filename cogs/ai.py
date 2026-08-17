@@ -35,7 +35,6 @@ def strip_think(text: str) -> str:
 
 GROQ_API_KEY  = os.getenv("GROQ_API_KEY")
 
-# Текстовая модель — llama-3.3-70b-versatile задепрекирован 17.06.2026,
 # мигрируем на qwen/qwen3.6-27b (поддерживает и текст, и vision).
 # thinking_effort: "none" — отключает режим "думания" (<think>...</think>),
 # чтобы бот сразу отдавал готовый ответ без промежуточного текста.
