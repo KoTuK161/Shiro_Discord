@@ -3,6 +3,8 @@
 # apt install -y ffmpeg
 
 import asyncio
+import json
+import os
 
 import discord
 import yt_dlp
@@ -12,7 +14,19 @@ from discord.ext import commands
 
 
 # ==========================================================
-# Настройки yt-dlp
+# НАСТРОЙКИ
+# ==========================================================
+
+# Текстовый канал, в котором разрешены музыкальные команды
+MUSIC_CHANNEL_ID = 1530307336911196381
+
+# Путь к JSON с сохранёнными треками
+DATA_DIR = "/app/data"
+MUSIC_FILE = os.path.join(DATA_DIR, "music.json")
+
+
+# ==========================================================
+# YT-DLP
 # ==========================================================
 
 YTDL_OPTIONS = {
@@ -26,7 +40,7 @@ YTDL_OPTIONS = {
 
 
 # ==========================================================
-# Настройки FFmpeg
+# FFMPEG
 # ==========================================================
 
 FFMPEG_OPTIONS = {
@@ -40,7 +54,7 @@ FFMPEG_OPTIONS = {
 
 
 # ==========================================================
-# Music Cog
+# MUSIC COG
 # ==========================================================
 
 class Music(commands.Cog):
@@ -48,40 +62,253 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-        # Очередь треков для каждого сервера
+        # --------------------------------------------------
+        # Очереди
         #
-        # guild_id -> [track, track, track]
+        # guild_id -> список треков
+        # --------------------------------------------------
+
         self.queues: dict[int, list] = {}
 
+        # --------------------------------------------------
         # Текущий трек
         #
         # guild_id -> track
+        # --------------------------------------------------
+
         self.current: dict[int, dict] = {}
 
-        # Флаг пропуска текущего трека
-        #
-        # guild_id -> True / False
+        # --------------------------------------------------
+        # Флаг /music_skip
+        # --------------------------------------------------
+
         self.skipping: dict[int, bool] = {}
 
-        # Громкость для каждого сервера
+        # --------------------------------------------------
+        # Громкость серверов
         #
-        # Значение хранится в процентах:
-        # 100 = 100%
-        # 50  = 50%
-        # 0   = 0%
+        # guild_id -> volume
+        # --------------------------------------------------
+
         self.volumes: dict[int, float] = {}
+
+        # --------------------------------------------------
+        # Сохранённые пользователем треки
+        #
+        # name -> YouTube URL
+        # --------------------------------------------------
+
+        self.saved_tracks: dict[str, str] = {}
+
+        # --------------------------------------------------
+        # Блокировка работы с JSON
+        # --------------------------------------------------
+
+        self.file_lock = asyncio.Lock()
+
+        # --------------------------------------------------
+        # Создаём папку /app/data
+        # --------------------------------------------------
+
+        os.makedirs(
+            DATA_DIR,
+            exist_ok=True
+        )
+
+        # --------------------------------------------------
+        # Загружаем сохранённые треки
+        # --------------------------------------------------
+
+        self.load_saved_tracks()
+
+    # ======================================================
+    # JSON
+    # ======================================================
+
+    def load_saved_tracks(self):
+        """
+        Загружает сохранённые треки из music.json.
+        """
+
+        if not os.path.exists(MUSIC_FILE):
+
+            self.saved_tracks = {}
+
+            self.save_saved_tracks_sync()
+
+            print(
+                f"[Music] Создан файл {MUSIC_FILE}"
+            )
+
+            return
+
+        try:
+
+            with open(
+                MUSIC_FILE,
+                "r",
+                encoding="utf-8"
+            ) as file:
+
+                data = json.load(file)
+
+            if isinstance(data, dict):
+
+                self.saved_tracks = data
+
+            else:
+
+                print(
+                    "[Music] ⚠️ music.json имеет "
+                    "неправильный формат."
+                )
+
+                self.saved_tracks = {}
+
+            print(
+                f"[Music] Загружено сохранённых треков: "
+                f"{len(self.saved_tracks)}"
+            )
+
+        except json.JSONDecodeError as e:
+
+            print(
+                f"[Music] ❌ Ошибка чтения music.json: {e}"
+            )
+
+            self.saved_tracks = {}
+
+        except Exception as e:
+
+            print(
+                f"[Music] ❌ Ошибка загрузки music.json: "
+                f"{type(e).__name__}: {e}"
+            )
+
+            self.saved_tracks = {}
+
+    # ======================================================
+
+    def save_saved_tracks_sync(self):
+        """
+        Синхронно сохраняет JSON.
+        Используется при запуске Cog.
+        """
+
+        with open(
+            MUSIC_FILE,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                self.saved_tracks,
+                file,
+                ensure_ascii=False,
+                indent=4
+            )
+
+    # ======================================================
+
+    async def save_saved_tracks(self):
+        """
+        Сохраняет сохранённые треки в JSON.
+        """
+
+        async with self.file_lock:
+
+            loop = asyncio.get_running_loop()
+
+            data = dict(
+                self.saved_tracks
+            )
+
+            def save():
+
+                with open(
+                    MUSIC_FILE,
+                    "w",
+                    encoding="utf-8"
+                ) as file:
+
+                    json.dump(
+                        data,
+                        file,
+                        ensure_ascii=False,
+                        indent=4
+                    )
+
+            await loop.run_in_executor(
+                None,
+                save
+            )
+
+    # ======================================================
+    # Проверка музыкального канала
+    # ======================================================
+
+    async def check_music_channel(
+        self,
+        interaction: discord.Interaction
+    ) -> bool:
+
+        if interaction.channel_id == MUSIC_CHANNEL_ID:
+            return True
+
+        await interaction.response.send_message(
+            "❌ Музыкальные команды доступны "
+            f"только в <#{MUSIC_CHANNEL_ID}>.",
+            ephemeral=True
+        )
+
+        return False
+
+    # ======================================================
+    # Поиск сохранённого трека
+    # ======================================================
+
+    def find_saved_track(
+        self,
+        name: str
+    ):
+        """
+        Ищет сохранённый трек без учёта регистра.
+
+        Например:
+        Phonk
+        phonk
+        PHONK
+
+        будут считаться одним названием.
+        """
+
+        name_normalized = name.strip().casefold()
+
+        for saved_name, url in self.saved_tracks.items():
+
+            if saved_name.casefold() == name_normalized:
+
+                return saved_name, url
+
+        return None, None
 
     # ======================================================
     # Получение информации с YouTube
     # ======================================================
 
-    async def get_audio_info(self, url: str):
+    async def get_audio_info(
+        self,
+        url: str
+    ):
 
         loop = asyncio.get_running_loop()
 
         def extract():
 
-            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+            with yt_dlp.YoutubeDL(
+                YTDL_OPTIONS
+            ) as ydl:
+
                 return ydl.extract_info(
                     url,
                     download=False
@@ -93,7 +320,7 @@ class Music(commands.Cog):
         )
 
     # ======================================================
-    # Запуск конкретного трека
+    # Запуск трека
     # ======================================================
 
     def start_track(
@@ -106,7 +333,7 @@ class Music(commands.Cog):
         try:
 
             # ------------------------------------------------
-            # Создаём FFmpeg источник
+            # FFmpeg
             # ------------------------------------------------
 
             source = discord.FFmpegPCMAudio(
@@ -115,10 +342,7 @@ class Music(commands.Cog):
             )
 
             # ------------------------------------------------
-            # Получаем громкость сервера
-            #
-            # Если значение ещё не задавали,
-            # используется 100%.
+            # Громкость
             # ------------------------------------------------
 
             volume = self.volumes.get(
@@ -126,14 +350,13 @@ class Music(commands.Cog):
                 100
             )
 
-            # Переводим проценты в диапазон 0.0 - 1.0
             source = discord.PCMVolumeTransformer(
                 source,
                 volume=volume / 100
             )
 
             # ------------------------------------------------
-            # Запускаем воспроизведение
+            # Воспроизведение
             # ------------------------------------------------
 
             voice_client.play(
@@ -144,7 +367,10 @@ class Music(commands.Cog):
                 )
             )
 
+            # ------------------------------------------------
             # Сохраняем текущий трек
+            # ------------------------------------------------
+
             self.current[guild_id] = track
 
             print(
@@ -170,7 +396,7 @@ class Music(commands.Cog):
             return False
 
     # ======================================================
-    # Callback после окончания трека
+    # Callback FFmpeg
     # ======================================================
 
     def on_track_finished(
@@ -185,11 +411,6 @@ class Music(commands.Cog):
                 f"[Music] ❌ Ошибка воспроизведения "
                 f"guild={guild_id}: {error}"
             )
-
-        # Callback FFmpeg может выполняться
-        # в отдельном потоке.
-        #
-        # Поэтому возвращаемся в asyncio loop.
 
         self.bot.loop.call_soon_threadsafe(
             lambda: asyncio.create_task(
@@ -209,8 +430,7 @@ class Music(commands.Cog):
     ):
 
         # --------------------------------------------------
-        # Если трек был пропущен через /skip,
-        # /skip самостоятельно запустит следующий.
+        # Если был /music_skip
         # --------------------------------------------------
 
         if self.skipping.get(
@@ -223,7 +443,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Получаем сервер
+        # Сервер
         # --------------------------------------------------
 
         guild = self.bot.get_guild(
@@ -240,7 +460,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Получаем VoiceClient
+        # VoiceClient
         # --------------------------------------------------
 
         voice_client = guild.voice_client
@@ -255,7 +475,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Запускаем следующий трек
+        # Следующий трек
         # --------------------------------------------------
 
         await self.play_next(
@@ -264,7 +484,7 @@ class Music(commands.Cog):
         )
 
     # ======================================================
-    # Запуск следующего трека
+    # Следующий трек
     # ======================================================
 
     async def play_next(
@@ -297,7 +517,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Берём первый трек из очереди
+        # Берём следующий
         # --------------------------------------------------
 
         track = queue.pop(0)
@@ -313,8 +533,8 @@ class Music(commands.Cog):
         )
 
         # --------------------------------------------------
-        # Если запуск не удался —
-        # пробуем следующий трек
+        # Если не получилось —
+        # пробуем следующий
         # --------------------------------------------------
 
         if not success:
@@ -325,29 +545,34 @@ class Music(commands.Cog):
             )
 
     # ======================================================
-    # /play
+    # /music_play
     # ======================================================
 
     @app_commands.command(
-        name="play",
-        description="Воспроизвести музыку с YouTube"
+        name="music_play",
+        description="Воспроизвести музыку с YouTube или сохранённый трек"
     )
     @app_commands.describe(
-        url="Ссылка на видео YouTube"
+        query="Ссылка на YouTube или название сохранённого трека"
     )
-    async def play(
+    async def music_play(
         self,
         interaction: discord.Interaction,
-        url: str
+        query: str
     ):
+
+        # --------------------------------------------------
+        # Проверяем канал
+        # --------------------------------------------------
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
 
         await interaction.response.defer()
 
         guild = interaction.guild
-
-        # --------------------------------------------------
-        # Проверяем сервер
-        # --------------------------------------------------
 
         if guild is None:
 
@@ -360,7 +585,7 @@ class Music(commands.Cog):
         guild_id = guild.id
 
         # --------------------------------------------------
-        # Проверяем голосовое подключение
+        # Проверяем VoiceClient
         # --------------------------------------------------
 
         voice_client = guild.voice_client
@@ -377,7 +602,36 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Получаем информацию о YouTube-видео
+        # Определяем:
+        #
+        # сохранённый трек
+        # или
+        # ссылка YouTube
+        # --------------------------------------------------
+
+        saved_name, saved_url = self.find_saved_track(
+            query
+        )
+
+        if saved_url:
+
+            url = saved_url
+
+            source_name = saved_name
+
+            print(
+                f"[Music] Найден сохранённый трек: "
+                f"{saved_name}"
+            )
+
+        else:
+
+            url = query
+
+            source_name = None
+
+        # --------------------------------------------------
+        # Получаем информацию с YouTube
         # --------------------------------------------------
 
         try:
@@ -400,14 +654,27 @@ class Music(commands.Cog):
 
             traceback.print_exc()
 
+            if source_name:
+
+                message = (
+                    f"❌ Не удалось воспроизвести "
+                    f"сохранённый трек `{source_name}`."
+                )
+
+            else:
+
+                message = (
+                    "❌ Не удалось получить аудио с YouTube."
+                )
+
             await interaction.followup.send(
-                "❌ Не удалось получить аудио с YouTube."
+                message
             )
 
             return
 
         # --------------------------------------------------
-        # Проверяем результат
+        # Проверяем информацию
         # --------------------------------------------------
 
         if not info:
@@ -419,7 +686,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Если yt-dlp вернул entries
+        # entries
         # --------------------------------------------------
 
         if "entries" in info:
@@ -439,7 +706,7 @@ class Music(commands.Cog):
             info = entries[0]
 
         # --------------------------------------------------
-        # Получаем URL аудиопотока
+        # Аудио URL
         # --------------------------------------------------
 
         audio_url = info.get(
@@ -455,13 +722,13 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Создаём объект трека
+        # Создаём трек
         # --------------------------------------------------
 
         track = {
             "title": info.get(
                 "title",
-                "Без названия"
+                source_name or "Без названия"
             ),
 
             "url": audio_url,
@@ -477,7 +744,7 @@ class Music(commands.Cog):
         }
 
         # --------------------------------------------------
-        # Если сейчас ничего не играет —
+        # Если ничего не играет —
         # запускаем сразу
         # --------------------------------------------------
 
@@ -500,15 +767,25 @@ class Music(commands.Cog):
 
                 return
 
-            await interaction.followup.send(
-                f"▶️ **Сейчас играет:** "
-                f"`{track['title']}`"
-            )
+            if source_name:
+
+                await interaction.followup.send(
+                    f"▶️ **Сейчас играет:** "
+                    f"`{source_name}`\n"
+                    f"🎵 `{track['title']}`"
+                )
+
+            else:
+
+                await interaction.followup.send(
+                    f"▶️ **Сейчас играет:** "
+                    f"`{track['title']}`"
+                )
 
             return
 
         # --------------------------------------------------
-        # Если музыка уже играет —
+        # Если уже играет или стоит на паузе —
         # добавляем в очередь
         # --------------------------------------------------
 
@@ -523,24 +800,39 @@ class Music(commands.Cog):
 
         position = len(queue)
 
-        await interaction.followup.send(
-            f"🎵 **Добавлено в очередь:** "
-            f"`{track['title']}`\n"
-            f"Позиция: **{position}**"
-        )
+        if source_name:
+
+            await interaction.followup.send(
+                f"🎵 **Добавлено в очередь:** "
+                f"`{source_name}`\n"
+                f"Позиция: **{position}**"
+            )
+
+        else:
+
+            await interaction.followup.send(
+                f"🎵 **Добавлено в очередь:** "
+                f"`{track['title']}`\n"
+                f"Позиция: **{position}**"
+            )
 
     # ======================================================
-    # /pause
+    # /music_pause
     # ======================================================
 
     @app_commands.command(
-        name="pause",
+        name="music_pause",
         description="Поставить музыку на паузу"
     )
-    async def pause(
+    async def music_pause(
         self,
         interaction: discord.Interaction
     ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
 
         guild = interaction.guild
 
@@ -561,10 +853,6 @@ class Music(commands.Cog):
             )
 
             return
-
-        # --------------------------------------------------
-        # Уже на паузе
-        # --------------------------------------------------
 
         if voice_client.is_paused():
 
@@ -574,10 +862,6 @@ class Music(commands.Cog):
 
             return
 
-        # --------------------------------------------------
-        # Ничего не играет
-        # --------------------------------------------------
-
         if not voice_client.is_playing():
 
             await interaction.response.send_message(
@@ -586,10 +870,6 @@ class Music(commands.Cog):
 
             return
 
-        # --------------------------------------------------
-        # Ставим на паузу
-        # --------------------------------------------------
-
         voice_client.pause()
 
         await interaction.response.send_message(
@@ -597,17 +877,22 @@ class Music(commands.Cog):
         )
 
     # ======================================================
-    # /resume
+    # /music_resume
     # ======================================================
 
     @app_commands.command(
-        name="resume",
-        description="Продолжить воспроизведение после паузы"
+        name="music_resume",
+        description="Продолжить музыку после паузы"
     )
-    async def resume(
+    async def music_resume(
         self,
         interaction: discord.Interaction
     ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
 
         guild = interaction.guild
 
@@ -628,10 +913,6 @@ class Music(commands.Cog):
             )
 
             return
-
-        # --------------------------------------------------
-        # Проверяем паузу
-        # --------------------------------------------------
 
         if not voice_client.is_paused():
 
@@ -644,14 +925,10 @@ class Music(commands.Cog):
             else:
 
                 await interaction.response.send_message(
-                    "❌ Сейчас ничего не стоит на паузе."
+                    "❌ Сейчас музыка не стоит на паузе."
                 )
 
             return
-
-        # --------------------------------------------------
-        # Продолжаем
-        # --------------------------------------------------
 
         voice_client.resume()
 
@@ -660,17 +937,22 @@ class Music(commands.Cog):
         )
 
     # ======================================================
-    # /skip
+    # /music_skip
     # ======================================================
 
     @app_commands.command(
-        name="skip",
+        name="music_skip",
         description="Пропустить текущий трек"
     )
-    async def skip(
+    async def music_skip(
         self,
         interaction: discord.Interaction
     ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
 
         guild = interaction.guild
 
@@ -694,10 +976,6 @@ class Music(commands.Cog):
 
             return
 
-        # --------------------------------------------------
-        # Проверяем воспроизведение
-        # --------------------------------------------------
-
         if (
             not voice_client.is_playing()
             and not voice_client.is_paused()
@@ -710,17 +988,15 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Сообщаем обработчику окончания,
-        # что это был /skip
+        # Отмечаем skip
         # --------------------------------------------------
 
         self.skipping[guild_id] = True
 
-        # Останавливаем текущий трек.
-        #
-        # Это вызовет on_track_finished(),
-        # но тот увидит skipping=True
-        # и не запустит следующий.
+        # --------------------------------------------------
+        # Останавливаем текущий трек
+        # --------------------------------------------------
+
         voice_client.stop()
 
         # --------------------------------------------------
@@ -751,7 +1027,7 @@ class Music(commands.Cog):
             if success:
 
                 await interaction.response.send_message(
-                    f"⏭️ **Пропущено. Сейчас играет:** "
+                    f"⏭️ **Сейчас играет:** "
                     f"`{next_track['title']}`"
                 )
 
@@ -761,9 +1037,6 @@ class Music(commands.Cog):
                     "⏭️ Трек пропущен, "
                     "но следующий трек не удалось запустить."
                 )
-
-                # Если следующий не запустился,
-                # пробуем продолжить очередь.
 
                 await self.play_next(
                     guild_id,
@@ -788,21 +1061,26 @@ class Music(commands.Cog):
         )
 
     # ======================================================
-    # /volume
+    # /music_volume
     # ======================================================
 
     @app_commands.command(
-        name="volume",
+        name="music_volume",
         description="Установить или показать громкость"
     )
     @app_commands.describe(
         volume="Громкость от 0 до 100 процентов"
     )
-    async def volume(
+    async def music_volume(
         self,
         interaction: discord.Interaction,
         volume: float | None = None
     ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
 
         guild = interaction.guild
 
@@ -817,7 +1095,7 @@ class Music(commands.Cog):
         guild_id = guild.id
 
         # --------------------------------------------------
-        # /volume без значения
+        # /music_volume
         # --------------------------------------------------
 
         if volume is None:
@@ -835,7 +1113,7 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Проверяем диапазон
+        # Проверяем значение
         # --------------------------------------------------
 
         if volume < 0 or volume > 100:
@@ -848,14 +1126,13 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Сохраняем громкость
+        # Сохраняем
         # --------------------------------------------------
 
         self.volumes[guild_id] = volume
 
         # --------------------------------------------------
-        # Если сейчас что-то играет —
-        # меняем громкость сразу
+        # Меняем текущий источник
         # --------------------------------------------------
 
         voice_client = guild.voice_client
@@ -871,13 +1148,193 @@ class Music(commands.Cog):
 
                 source.volume = volume / 100
 
-        # --------------------------------------------------
-        # Ответ
-        # --------------------------------------------------
-
         await interaction.response.send_message(
             f"🔊 Громкость установлена: "
             f"**{volume:.0f}%**"
+        )
+
+    # ======================================================
+    # /music_save
+    # ======================================================
+
+    @app_commands.command(
+        name="music_save",
+        description="Сохранить YouTube-трек под своим названием"
+    )
+    @app_commands.describe(
+        url="Ссылка на видео YouTube",
+        text="Название, под которым сохранить трек"
+    )
+    async def music_save(
+        self,
+        interaction: discord.Interaction,
+        url: str,
+        text: str
+    ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
+
+        # --------------------------------------------------
+        # Чистим название
+        # --------------------------------------------------
+
+        name = text.strip()
+
+        if not name:
+
+            await interaction.response.send_message(
+                "❌ Название трека не может быть пустым."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Проверяем URL
+        # --------------------------------------------------
+
+        if not (
+            "youtube.com" in url.lower()
+            or "youtu.be" in url.lower()
+        ):
+
+            await interaction.response.send_message(
+                "❌ Для сохранения нужна ссылка на YouTube."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Проверяем существующее название
+        # --------------------------------------------------
+
+        existing_name, _ = self.find_saved_track(
+            name
+        )
+
+        if existing_name:
+
+            await interaction.response.send_message(
+                f"❌ Название `{existing_name}` "
+                "уже используется."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Сохраняем
+        # --------------------------------------------------
+
+        self.saved_tracks[name] = url
+
+        try:
+
+            await self.save_saved_tracks()
+
+        except Exception as e:
+
+            # Если JSON не удалось сохранить,
+            # откатываем изменение в памяти.
+
+            self.saved_tracks.pop(
+                name,
+                None
+            )
+
+            print(
+                f"[Music] ❌ Ошибка сохранения: "
+                f"{type(e).__name__}: {e}"
+            )
+
+            await interaction.response.send_message(
+                "❌ Не удалось сохранить трек."
+            )
+
+            return
+
+        await interaction.response.send_message(
+            f"💾 Трек сохранён под названием "
+            f"**{name}**."
+        )
+
+        print(
+            f"[Music] 💾 Сохранён трек: "
+            f"{name} -> {url}"
+        )
+
+    # ======================================================
+    # /music_del
+    # ======================================================
+
+    @app_commands.command(
+        name="music_del",
+        description="Удалить сохранённый трек"
+    )
+    @app_commands.describe(
+        text="Название сохранённого трека"
+    )
+    async def music_del(
+        self,
+        interaction: discord.Interaction,
+        text: str
+    ):
+
+        if not await self.check_music_channel(
+            interaction
+        ):
+            return
+
+        # --------------------------------------------------
+        # Ищем название
+        # --------------------------------------------------
+
+        saved_name, _ = self.find_saved_track(
+            text
+        )
+
+        if not saved_name:
+
+            await interaction.response.send_message(
+                f"❌ Сохранённый трек `{text}` не найден."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Удаляем
+        # --------------------------------------------------
+
+        self.saved_tracks.pop(
+            saved_name,
+            None
+        )
+
+        try:
+
+            await self.save_saved_tracks()
+
+        except Exception as e:
+
+            print(
+                f"[Music] ❌ Ошибка удаления: "
+                f"{type(e).__name__}: {e}"
+            )
+
+            await interaction.response.send_message(
+                "❌ Не удалось обновить music.json."
+            )
+
+            return
+
+        await interaction.response.send_message(
+            f"🗑️ Трек **{saved_name}** удалён."
+        )
+
+        print(
+            f"[Music] 🗑️ Удалён трек: "
+            f"{saved_name}"
         )
 
 
