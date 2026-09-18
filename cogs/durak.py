@@ -123,11 +123,22 @@ def _load_back() -> Optional[Image.Image]:
 
 
 def _font(size: int = 18):
+    """Возвращает масштабируемый шрифт и не скатывается к мелкому bitmap-font."""
+    font_paths = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "LiberationSans-Bold.ttf",
+    )
+    for path in font_paths:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
     try:
-        return ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size
-        )
-    except Exception:
+        # Pillow 10+ умеет масштабировать встроенный fallback-шрифт.
+        return ImageFont.load_default(size=size)
+    except TypeError:
         return ImageFont.load_default()
 
 
@@ -185,7 +196,11 @@ def save_games(games: dict):
     GAMES_FILE.parent.mkdir(parents=True, exist_ok=True)
     data = {}
     for chan_id, g in games.items():
-        data[str(chan_id)] = {
+        # Одна партия находится в active_games под ID каждого личного канала.
+        # Сохраняем её один раз — по основному ID партии.
+        if str(g.channel_id) in data:
+            continue
+        data[str(g.channel_id)] = {
             "deck":         [_card_to_dict(c) for c in g.deck],
             "trump":        g.trump,
             "trump_card":   _card_to_dict(g.trump_card) if g.trump_card else None,
@@ -197,6 +212,7 @@ def save_games(games: dict):
             "attacker_idx": g.attacker_idx,
             "defender_idx": g.defender_idx,
             "channel_id":   g.channel_id,
+            "player_channels": {str(uid): cid for uid, cid in g.player_channels.items()},
             "guild_id":     g.guild_id,
             "mode":         g.mode,
             "deck_size":    g.deck_size,
@@ -240,6 +256,7 @@ class DurakGame:
     attacker_idx: int                      # индекс атакующего в players
     defender_idx: int                      # индекс защищающегося в players
     channel_id:   int
+    player_channels: dict[int, int]       # user_id -> личный канал игрока
     guild_id:     int
     mode:         str                      # "classic" | "transfer"
     deck_size:    int                      # 36 | 52
@@ -276,7 +293,7 @@ class DurakGame:
         return self.players.index(active[(pos + skip) % len(active)])
 
 
-# Хранилище: channel_id -> DurakGame
+# Хранилище: ID личного канала -> DurakGame.
 active_games: dict[int, DurakGame] = {}
 
 
@@ -293,7 +310,11 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     """
     hand      = game.hands.get(viewer_id, [])
     n_table   = max(len(game.table_attack), 1)
-    table_w   = n_table * (CARD_W + PADDING) + PADDING
+    table_gap = CARD_W + PADDING
+    # Резервируем справа отдельную область для открытого козыря и колоды.
+    # Иначе при 5–6 картах на столе они наезжают на колоду.
+    table_cards_right = PADDING + (n_table - 1) * table_gap + CARD_W + 15
+    table_w = table_cards_right + PADDING + (CARD_W * 2 + 5) + PADDING
     hand_w    = PADDING + max(len(hand), 1) * (CARD_W + 16) + PADDING
     img_w     = max(table_w, hand_w, 800)
     img_h     = CARD_H * 4 + PADDING * 6 + 60 + HAND_NUM_OFFSET + 60  # opponents / table / deck row / own hand + number labels + hand title
@@ -335,7 +356,7 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     draw.text((PADDING, table_y - 36), "Table:", fill=COLOR_TEXT, font=fn)
 
     for i, atk_card in enumerate(game.table_attack):
-        x = PADDING + i * (CARD_W + PADDING)
+        x = PADDING + i * table_gap
 
         # Карта атаки
         atk_img = _load_card_img(atk_card.filename())
@@ -356,14 +377,14 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
     # ----------------------------------------------------------
     # Колода и козырь
     # ----------------------------------------------------------
-    deck_x = img_w - CARD_W - PADDING * 2
+    deck_x = img_w - CARD_W - PADDING
     deck_y = table_y
     if game.deck:
         if back:
             img.paste(back, (deck_x, deck_y), back)
         draw.text((deck_x, deck_y + CARD_H + 4),
                   f"Deck: {len(game.deck)}", fill=COLOR_TEXT, font=fn_s)
-    if game.trump_card:
+    if game.trump_card and game.deck:
         trump_img = _load_card_img(game.trump_card.filename())
         if trump_img:
             img.paste(trump_img, (deck_x - CARD_W - 5, deck_y), trump_img)
@@ -403,8 +424,33 @@ def render_table(game: DurakGame, viewer_id: int) -> discord.File:
 # Вспомогательные функции
 # ==========================================================
 
+def remove_duplicate_cards_from_deck(game: DurakGame):
+    """Удаляет из колоды дубликаты, которые уже находятся в игре.
+
+    Это также безопасно чинит сохранённые партии, созданные старой версией,
+    где нижний козырь ошибочно добавлялся в колоду второй раз.
+    """
+    dealt_cards = {
+        card
+        for hand in game.hands.values()
+        for card in hand
+    }
+    dealt_cards.update(game.table_attack)
+    dealt_cards.update(card for card in game.table_defend if card)
+
+    unique_deck = []
+    for card in game.deck:
+        if card in dealt_cards:
+            log.warning("[durak] Удалён дубликат карты из сохранённой партии: %s", card.display())
+            continue
+        dealt_cards.add(card)
+        unique_deck.append(card)
+    game.deck[:] = unique_deck
+
+
 def deal_cards(game: DurakGame, count: int = 6):
     """Добирает карты до 6 в руке начиная с атакующего."""
+    remove_duplicate_cards_from_deck(game)
     order = []
     active = game.active_players()
     if not active:
@@ -417,7 +463,11 @@ def deal_cards(game: DurakGame, count: int = 6):
 
     for pid in order:
         while len(game.hands[pid]) < count and game.deck:
-            game.hands[pid].append(game.deck.pop(0))
+            card = game.deck.pop(0)
+            game.hands[pid].append(card)
+            # Нижний козырь становится обычной картой, когда его забрали.
+            if card == game.trump_card:
+                game.trump_card = None
 
 
 def check_win_condition(game: DurakGame) -> list[int]:
@@ -603,47 +653,51 @@ async def get_or_create_category(guild: discord.Guild) -> discord.CategoryChanne
     return await guild.create_category(CATEGORY_NAME)
 
 
-async def create_game_channel(
+async def create_player_channels(
     guild:    discord.Guild,
     category: discord.CategoryChannel,
     creator:  discord.Member,
     players:  list[discord.Member],
-) -> discord.TextChannel:
-    name = f"🃏-дурак-{creator.display_name}".lower().replace(" ", "-")[:80]
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(
-            read_messages=False,
-            send_messages=False,
-        ),
-        guild.me: discord.PermissionOverwrite(
-            read_messages=True,
-            send_messages=True,
-            manage_messages=True,
-            manage_channels=True,
-        ),
-    }
-    for m in players:
-        overwrites[m] = discord.PermissionOverwrite(
-            read_messages=True,
-            send_messages=True,
+) -> dict[int, discord.TextChannel]:
+    """Создаёт по одному закрытому игровому каналу для каждого человека."""
+    channels = {}
+    for member in players:
+        name = f"🃏-дурак-{creator.id}-{member.display_name}".lower().replace(" ", "-")[:80]
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                read_messages=False,
+                send_messages=False,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_messages=True,
+                manage_channels=True,
+            ),
+            member: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+            ),
+        }
+        channels[member.id] = await guild.create_text_channel(
+            name, category=category, overwrites=overwrites
         )
-    return await guild.create_text_channel(name, category=category, overwrites=overwrites)
+    return channels
 
 
 async def cleanup_game(bot: commands.Bot, game: DurakGame):
     delete_saved_game(game.channel_id)
-    if game.channel_id in active_games:
-        del active_games[game.channel_id]
-
-    channel = bot.get_channel(game.channel_id)
-    if not channel:
-        return
-    category = channel.category
-    try:
-        await channel.delete(reason="Партия в дурака завершена")
-    except Exception as e:
-        log.error(f"[durak] Ошибка удаления канала: {e}")
-        return
+    channel_ids = list(game.player_channels.values())
+    channels = [bot.get_channel(channel_id) for channel_id in channel_ids]
+    category = next((channel.category for channel in channels if channel), None)
+    for channel_id, channel in zip(channel_ids, channels):
+        active_games.pop(channel_id, None)
+        if not channel:
+            continue
+        try:
+            await channel.delete(reason="Партия в дурака завершена")
+        except Exception as e:
+            log.error(f"[durak] Ошибка удаления канала {channel_id}: {e}")
 
     if category and category.name == CATEGORY_NAME:
         await asyncio.sleep(1)
@@ -669,17 +723,16 @@ async def send_game_state(
     """Отправляет embed + индивидуальное PNG каждому живому игроку."""
     embed = build_status_embed(game, title=title, description=description)
 
-    if channel is None:
-        channel = bot.get_channel(game.channel_id)
-    if channel is None:
-        return
-
     for pid in game.active_players():
         if game.is_bot(pid):
             continue
+        player_channel = bot.get_channel(game.player_channels.get(pid, 0))
+        if player_channel is None:
+            log.warning(f"[durak] Не найден личный канал игрока {pid}")
+            continue
         board_file = render_table(game, pid)
         try:
-            await channel.send(
+            await player_channel.send(
                 content=f"<@{pid}>",
                 embed=embed,
                 file=board_file
@@ -782,10 +835,13 @@ async def finish_game(bot: commands.Bot, game: DurakGame, channel: discord.TextC
             record_result(uid, mode, "draws")
 
     embed = discord.Embed(title="🏁 Игра завершена!", description=desc, color=0x2d6b44)
-    try:
-        await channel.send(embed=embed)
-    except Exception:
-        pass
+    for channel_id in game.player_channels.values():
+        player_channel = bot.get_channel(channel_id)
+        if player_channel:
+            try:
+                await player_channel.send(embed=embed)
+            except Exception:
+                pass
 
     await asyncio.sleep(5)
     await cleanup_game(bot, game)
@@ -821,6 +877,12 @@ class Durak(commands.Cog):
                     attacker_idx = data["attacker_idx"],
                     defender_idx = data["defender_idx"],
                     channel_id   = data["channel_id"],
+                    player_channels = {
+                        int(uid): int(channel_id)
+                        for uid, channel_id in data.get(
+                            "player_channels", {str(data["players"][0]): data["channel_id"]}
+                        ).items()
+                    },
                     guild_id     = data["guild_id"],
                     mode         = data.get("mode", "classic"),
                     deck_size    = data.get("deck_size", 36),
@@ -828,8 +890,9 @@ class Durak(commands.Cog):
                     losers       = data.get("losers", []),
                     finished     = data.get("finished", False),
                 )
-                active_games[int(chan_id_str)] = game
-                log.info(f"[durak] Восстановлена партия в канале {chan_id_str}")
+                for player_channel_id in game.player_channels.values():
+                    active_games[player_channel_id] = game
+                log.info(f"[durak] Восстановлена партия {chan_id_str}")
             except Exception as e:
                 log.error(f"[durak] Не удалось восстановить партию {chan_id_str}: {e}")
 
@@ -848,6 +911,14 @@ class Durak(commands.Cog):
         uid    = message.author.id
         active = game.active_players()
         if uid not in active:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+        # Даже при правах администратора игрок не может управлять партией
+        # из чужого личного канала.
+        if game.player_channels.get(uid) != message.channel.id:
             try:
                 await message.delete()
             except Exception:
@@ -1173,9 +1244,6 @@ class Durak(commands.Cog):
                 if deck:
                     hands[pid].append(deck.pop(0))
 
-        # Кладём козырную карту обратно в конец
-        deck.append(trump_card)
-
         # Определяем первого атакующего — у кого наименьший козырь
         first_attacker = 0
         min_trump_val  = 999
@@ -1192,7 +1260,9 @@ class Durak(commands.Cog):
         # Создаём категорию и канал
         try:
             category = await get_or_create_category(guild)
-            channel  = await create_game_channel(guild, category, user, human_members)
+            player_channels = await create_player_channels(
+                guild, category, user, human_members
+            )
         except discord.Forbidden:
             await interaction.followup.send(
                 "❌ Нет прав для создания каналов.", ephemeral=True)
@@ -1209,14 +1279,16 @@ class Durak(commands.Cog):
             bot_players  = bot_players,
             attacker_idx = first_attacker,
             defender_idx = defender_idx,
-            channel_id   = channel.id,
+            channel_id   = player_channels[user.id].id,
+            player_channels = {uid: channel.id for uid, channel in player_channels.items()},
             guild_id     = guild.id,
             mode         = mode,
             deck_size    = deck_size,
             passed       = [],
             losers       = [],
         )
-        active_games[channel.id] = game
+        for player_channel_id in game.player_channels.values():
+            active_games[player_channel_id] = game
         save_games(active_games)
 
         mode_str = "Переводной" if mode == "transfer" else "Классический"
@@ -1230,13 +1302,15 @@ class Durak(commands.Cog):
             self.bot, game,
             title=f"🃏 Дурак — новая партия!",
             description=desc,
-            channel=channel,
         )
-        await interaction.followup.send(f"✅ Игра начата в {channel.mention}", ephemeral=True)
+        channel_mentions = ", ".join(channel.mention for channel in player_channels.values())
+        await interaction.followup.send(
+            f"✅ Игра начата. Личные игровые каналы: {channel_mentions}", ephemeral=True
+        )
 
         # Если первым ходит бот
         if game.is_bot(game.attacker_id):
-            await process_bot_turn(self.bot, game, channel)
+            await process_bot_turn(self.bot, game, player_channels[user.id])
 
     # -------------------------------------------------------
     # Статистика
