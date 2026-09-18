@@ -3,6 +3,7 @@
 # apt install -y ffmpeg
 
 import asyncio
+
 import discord
 import yt_dlp
 
@@ -23,6 +24,11 @@ YTDL_OPTIONS = {
     "extract_flat": False,
 }
 
+
+# ==========================================================
+# Настройки FFmpeg
+# ==========================================================
+
 FFMPEG_OPTIONS = {
     "before_options": (
         "-reconnect 1 "
@@ -42,21 +48,28 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-        # Очередь:
-        # guild_id -> список треков
+        # Очередь треков для каждого сервера
+        #
+        # guild_id -> [track, track, track]
         self.queues: dict[int, list] = {}
 
-        # Текущий трек:
+        # Текущий трек
+        #
         # guild_id -> track
         self.current: dict[int, dict] = {}
 
-        # Флаг пропуска:
-        # guild_id -> bool
+        # Флаг пропуска текущего трека
+        #
+        # guild_id -> True / False
         self.skipping: dict[int, bool] = {}
 
-        # Запущенная задача ожидания окончания трека:
-        # guild_id -> asyncio.Task
-        self.play_tasks: dict[int, asyncio.Task] = {}
+        # Громкость для каждого сервера
+        #
+        # Значение хранится в процентах:
+        # 100 = 100%
+        # 50  = 50%
+        # 0   = 0%
+        self.volumes: dict[int, float] = {}
 
     # ======================================================
     # Получение информации с YouTube
@@ -67,6 +80,7 @@ class Music(commands.Cog):
         loop = asyncio.get_running_loop()
 
         def extract():
+
             with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
                 return ydl.extract_info(
                     url,
@@ -90,10 +104,37 @@ class Music(commands.Cog):
     ) -> bool:
 
         try:
+
+            # ------------------------------------------------
+            # Создаём FFmpeg источник
+            # ------------------------------------------------
+
             source = discord.FFmpegPCMAudio(
                 track["url"],
                 **FFMPEG_OPTIONS
             )
+
+            # ------------------------------------------------
+            # Получаем громкость сервера
+            #
+            # Если значение ещё не задавали,
+            # используется 100%.
+            # ------------------------------------------------
+
+            volume = self.volumes.get(
+                guild_id,
+                100
+            )
+
+            # Переводим проценты в диапазон 0.0 - 1.0
+            source = discord.PCMVolumeTransformer(
+                source,
+                volume=volume / 100
+            )
+
+            # ------------------------------------------------
+            # Запускаем воспроизведение
+            # ------------------------------------------------
 
             voice_client.play(
                 source,
@@ -103,11 +144,13 @@ class Music(commands.Cog):
                 )
             )
 
+            # Сохраняем текущий трек
             self.current[guild_id] = track
 
             print(
                 f"[Music] ▶️ Запущен: "
-                f"{track['title']}"
+                f"{track['title']} "
+                f"(громкость {volume:.0f}%)"
             )
 
             return True
@@ -116,8 +159,13 @@ class Music(commands.Cog):
 
             print(
                 f"[Music] ❌ Ошибка запуска "
-                f"'{track['title']}': {e}"
+                f"'{track.get('title', 'Unknown')}': "
+                f"{type(e).__name__}: {e}"
             )
+
+            import traceback
+
+            traceback.print_exc()
 
             return False
 
@@ -132,16 +180,22 @@ class Music(commands.Cog):
     ):
 
         if error:
+
             print(
-                f"[Music] Ошибка воспроизведения "
+                f"[Music] ❌ Ошибка воспроизведения "
                 f"guild={guild_id}: {error}"
             )
 
-        # Callback FFmpeg выполняется в другом потоке.
-        # Возвращаемся в asyncio loop.
+        # Callback FFmpeg может выполняться
+        # в отдельном потоке.
+        #
+        # Поэтому возвращаемся в asyncio loop.
+
         self.bot.loop.call_soon_threadsafe(
             lambda: asyncio.create_task(
-                self.handle_track_finished(guild_id)
+                self.handle_track_finished(
+                    guild_id
+                )
             )
         )
 
@@ -154,23 +208,55 @@ class Music(commands.Cog):
         guild_id: int
     ):
 
-        # Если это был /skip —
-        # следующий трек уже будет запущен самим skip.
-        if self.skipping.get(guild_id, False):
+        # --------------------------------------------------
+        # Если трек был пропущен через /skip,
+        # /skip самостоятельно запустит следующий.
+        # --------------------------------------------------
+
+        if self.skipping.get(
+            guild_id,
+            False
+        ):
+
             self.skipping[guild_id] = False
+
             return
 
-        voice_client = self.bot.get_guild(guild_id)
+        # --------------------------------------------------
+        # Получаем сервер
+        # --------------------------------------------------
+
+        guild = self.bot.get_guild(
+            guild_id
+        )
+
+        if guild is None:
+
+            self.current.pop(
+                guild_id,
+                None
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Получаем VoiceClient
+        # --------------------------------------------------
+
+        voice_client = guild.voice_client
 
         if voice_client is None:
-            self.current.pop(guild_id, None)
+
+            self.current.pop(
+                guild_id,
+                None
+            )
+
             return
 
-        voice_client = voice_client.voice_client
-
-        if voice_client is None:
-            self.current.pop(guild_id, None)
-            return
+        # --------------------------------------------------
+        # Запускаем следующий трек
+        # --------------------------------------------------
 
         await self.play_next(
             guild_id,
@@ -192,7 +278,12 @@ class Music(commands.Cog):
             []
         )
 
+        # --------------------------------------------------
+        # Очередь пуста
+        # --------------------------------------------------
+
         if not queue:
+
             self.current.pop(
                 guild_id,
                 None
@@ -205,7 +296,15 @@ class Music(commands.Cog):
 
             return
 
+        # --------------------------------------------------
+        # Берём первый трек из очереди
+        # --------------------------------------------------
+
         track = queue.pop(0)
+
+        # --------------------------------------------------
+        # Запускаем
+        # --------------------------------------------------
 
         success = self.start_track(
             guild_id,
@@ -213,10 +312,13 @@ class Music(commands.Cog):
             track
         )
 
+        # --------------------------------------------------
+        # Если запуск не удался —
+        # пробуем следующий трек
+        # --------------------------------------------------
+
         if not success:
 
-            # Если трек не запустился,
-            # пробуем следующий.
             await self.play_next(
                 guild_id,
                 voice_client
@@ -243,10 +345,16 @@ class Music(commands.Cog):
 
         guild = interaction.guild
 
+        # --------------------------------------------------
+        # Проверяем сервер
+        # --------------------------------------------------
+
         if guild is None:
+
             await interaction.followup.send(
                 "❌ Эта команда доступна только на сервере."
             )
+
             return
 
         guild_id = guild.id
@@ -261,13 +369,15 @@ class Music(commands.Cog):
             voice_client is None
             or not voice_client.is_connected()
         ):
+
             await interaction.followup.send(
                 "❌ Я не нахожусь в голосовом канале."
             )
+
             return
 
         # --------------------------------------------------
-        # Получаем данные YouTube
+        # Получаем информацию о YouTube-видео
         # --------------------------------------------------
 
         try:
@@ -279,15 +389,26 @@ class Music(commands.Cog):
         except Exception as e:
 
             print(
-                f"[Music] ❌ Ошибка yt-dlp:\n{e}"
+                f"[Music] ❌ Ошибка yt-dlp:"
             )
 
+            print(
+                f"{type(e).__name__}: {e}"
+            )
+
+            import traceback
+
+            traceback.print_exc()
+
             await interaction.followup.send(
-                "❌ Не удалось получить аудио с YouTube.\n"
-                "Подробности смотри в консоли бота."
+                "❌ Не удалось получить аудио с YouTube."
             )
 
             return
+
+        # --------------------------------------------------
+        # Проверяем результат
+        # --------------------------------------------------
 
         if not info:
 
@@ -318,7 +439,7 @@ class Music(commands.Cog):
             info = entries[0]
 
         # --------------------------------------------------
-        # Формируем трек
+        # Получаем URL аудиопотока
         # --------------------------------------------------
 
         audio_url = info.get(
@@ -332,6 +453,10 @@ class Music(commands.Cog):
             )
 
             return
+
+        # --------------------------------------------------
+        # Создаём объект трека
+        # --------------------------------------------------
 
         track = {
             "title": info.get(
@@ -374,13 +499,6 @@ class Music(commands.Cog):
                 )
 
                 return
-
-            # ВАЖНО:
-            # здесь start_track уже вызвал
-            # voice_client.play()
-            #
-            # Поэтому только теперь говорим,
-            # что трек действительно запущен.
 
             await interaction.followup.send(
                 f"▶️ **Сейчас играет:** "
@@ -427,18 +545,26 @@ class Music(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
+
             await interaction.response.send_message(
                 "❌ Эта команда доступна только на сервере."
             )
+
             return
 
         voice_client = guild.voice_client
 
         if voice_client is None:
+
             await interaction.response.send_message(
                 "❌ Я не нахожусь в голосовом канале."
             )
+
             return
+
+        # --------------------------------------------------
+        # Уже на паузе
+        # --------------------------------------------------
 
         if voice_client.is_paused():
 
@@ -448,6 +574,10 @@ class Music(commands.Cog):
 
             return
 
+        # --------------------------------------------------
+        # Ничего не играет
+        # --------------------------------------------------
+
         if not voice_client.is_playing():
 
             await interaction.response.send_message(
@@ -456,10 +586,77 @@ class Music(commands.Cog):
 
             return
 
+        # --------------------------------------------------
+        # Ставим на паузу
+        # --------------------------------------------------
+
         voice_client.pause()
 
         await interaction.response.send_message(
             "⏸️ Музыка поставлена на паузу."
+        )
+
+    # ======================================================
+    # /resume
+    # ======================================================
+
+    @app_commands.command(
+        name="resume",
+        description="Продолжить воспроизведение после паузы"
+    )
+    async def resume(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        guild = interaction.guild
+
+        if guild is None:
+
+            await interaction.response.send_message(
+                "❌ Эта команда доступна только на сервере."
+            )
+
+            return
+
+        voice_client = guild.voice_client
+
+        if voice_client is None:
+
+            await interaction.response.send_message(
+                "❌ Я не нахожусь в голосовом канале."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Проверяем паузу
+        # --------------------------------------------------
+
+        if not voice_client.is_paused():
+
+            if voice_client.is_playing():
+
+                await interaction.response.send_message(
+                    "▶️ Музыка уже воспроизводится."
+                )
+
+            else:
+
+                await interaction.response.send_message(
+                    "❌ Сейчас ничего не стоит на паузе."
+                )
+
+            return
+
+        # --------------------------------------------------
+        # Продолжаем
+        # --------------------------------------------------
+
+        voice_client.resume()
+
+        await interaction.response.send_message(
+            "▶️ Музыка продолжена."
         )
 
     # ======================================================
@@ -478,9 +675,11 @@ class Music(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
+
             await interaction.response.send_message(
                 "❌ Эта команда доступна только на сервере."
             )
+
             return
 
         guild_id = guild.id
@@ -488,10 +687,16 @@ class Music(commands.Cog):
         voice_client = guild.voice_client
 
         if voice_client is None:
+
             await interaction.response.send_message(
                 "❌ Я не нахожусь в голосовом канале."
             )
+
             return
+
+        # --------------------------------------------------
+        # Проверяем воспроизведение
+        # --------------------------------------------------
 
         if (
             not voice_client.is_playing()
@@ -505,26 +710,31 @@ class Music(commands.Cog):
             return
 
         # --------------------------------------------------
-        # Отмечаем, что трек пропускается
+        # Сообщаем обработчику окончания,
+        # что это был /skip
         # --------------------------------------------------
 
         self.skipping[guild_id] = True
 
         # Останавливаем текущий трек.
         #
-        # Это вызовет callback FFmpeg,
-        # но handle_track_finished увидит
-        # skipping=True и НЕ запустит следующий.
+        # Это вызовет on_track_finished(),
+        # но тот увидит skipping=True
+        # и не запустит следующий.
         voice_client.stop()
 
         # --------------------------------------------------
-        # Запускаем следующий трек
+        # Получаем очередь
         # --------------------------------------------------
 
         queue = self.queues.setdefault(
             guild_id,
             []
         )
+
+        # --------------------------------------------------
+        # Есть следующий трек
+        # --------------------------------------------------
 
         if queue:
 
@@ -552,18 +762,123 @@ class Music(commands.Cog):
                     "но следующий трек не удалось запустить."
                 )
 
-        else:
+                # Если следующий не запустился,
+                # пробуем продолжить очередь.
 
-            self.current.pop(
-                guild_id,
-                None
-            )
+                await self.play_next(
+                    guild_id,
+                    voice_client
+                )
 
-            self.skipping[guild_id] = False
+            return
+
+        # --------------------------------------------------
+        # Очередь пуста
+        # --------------------------------------------------
+
+        self.current.pop(
+            guild_id,
+            None
+        )
+
+        self.skipping[guild_id] = False
+
+        await interaction.response.send_message(
+            "⏭️ Трек пропущен. Очередь пуста."
+        )
+
+    # ======================================================
+    # /volume
+    # ======================================================
+
+    @app_commands.command(
+        name="volume",
+        description="Установить или показать громкость"
+    )
+    @app_commands.describe(
+        volume="Громкость от 0 до 100 процентов"
+    )
+    async def volume(
+        self,
+        interaction: discord.Interaction,
+        volume: float | None = None
+    ):
+
+        guild = interaction.guild
+
+        if guild is None:
 
             await interaction.response.send_message(
-                "⏭️ Трек пропущен. Очередь пуста."
+                "❌ Эта команда доступна только на сервере."
             )
+
+            return
+
+        guild_id = guild.id
+
+        # --------------------------------------------------
+        # /volume без значения
+        # --------------------------------------------------
+
+        if volume is None:
+
+            current_volume = self.volumes.get(
+                guild_id,
+                100
+            )
+
+            await interaction.response.send_message(
+                f"🔊 Текущая громкость: "
+                f"**{current_volume:.0f}%**"
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Проверяем диапазон
+        # --------------------------------------------------
+
+        if volume < 0 or volume > 100:
+
+            await interaction.response.send_message(
+                "❌ Громкость должна быть "
+                "от **0 до 100**."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # Сохраняем громкость
+        # --------------------------------------------------
+
+        self.volumes[guild_id] = volume
+
+        # --------------------------------------------------
+        # Если сейчас что-то играет —
+        # меняем громкость сразу
+        # --------------------------------------------------
+
+        voice_client = guild.voice_client
+
+        if voice_client is not None:
+
+            source = voice_client.source
+
+            if isinstance(
+                source,
+                discord.PCMVolumeTransformer
+            ):
+
+                source.volume = volume / 100
+
+        # --------------------------------------------------
+        # Ответ
+        # --------------------------------------------------
+
+        await interaction.response.send_message(
+            f"🔊 Громкость установлена: "
+            f"**{volume:.0f}%**"
+        )
 
 
 # ==========================================================
