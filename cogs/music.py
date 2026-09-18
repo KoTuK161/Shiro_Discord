@@ -1,4 +1,6 @@
 # cogs/music.py
+# apt update
+# apt install -y ffmpeg
 
 import asyncio
 import discord
