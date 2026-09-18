@@ -8,9 +8,9 @@ from discord import app_commands
 from discord.ext import commands
 
 
-# =========================
+# ==========================================================
 # Настройки yt-dlp
-# =========================
+# ==========================================================
 
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -31,108 +31,198 @@ FFMPEG_OPTIONS = {
 }
 
 
-# =========================
-# Музыкальный Cog
-# =========================
+# ==========================================================
+# Music Cog
+# ==========================================================
 
 class Music(commands.Cog):
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-        # Очередь для каждого сервера
-        self.queues = {}
+        # Очередь:
+        # guild_id -> список треков
+        self.queues: dict[int, list] = {}
 
-        # Данные текущего трека
-        self.current = {}
+        # Текущий трек:
+        # guild_id -> track
+        self.current: dict[int, dict] = {}
 
-        # Блокировки, чтобы два /play одновременно
-        # не сломали очередь
-        self.locks = {}
+        # Флаг пропуска:
+        # guild_id -> bool
+        self.skipping: dict[int, bool] = {}
 
-    # =========================
-    # Получение информации YouTube
-    # =========================
+        # Запущенная задача ожидания окончания трека:
+        # guild_id -> asyncio.Task
+        self.play_tasks: dict[int, asyncio.Task] = {}
+
+    # ======================================================
+    # Получение информации с YouTube
+    # ======================================================
 
     async def get_audio_info(self, url: str):
+
         loop = asyncio.get_running_loop()
 
         def extract():
             with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-                return ydl.extract_info(url, download=False)
+                return ydl.extract_info(
+                    url,
+                    download=False
+                )
 
-        return await loop.run_in_executor(None, extract)
+        return await loop.run_in_executor(
+            None,
+            extract
+        )
 
-    # =========================
-    # Воспроизведение трека
-    # =========================
+    # ======================================================
+    # Запуск конкретного трека
+    # ======================================================
 
-    async def play_next(self, guild_id: int, voice_client: discord.VoiceClient):
-        queue = self.queues.setdefault(guild_id, [])
+    def start_track(
+        self,
+        guild_id: int,
+        voice_client: discord.VoiceClient,
+        track: dict
+    ) -> bool:
+
+        try:
+            source = discord.FFmpegPCMAudio(
+                track["url"],
+                **FFMPEG_OPTIONS
+            )
+
+            voice_client.play(
+                source,
+                after=lambda error: self.on_track_finished(
+                    guild_id,
+                    error
+                )
+            )
+
+            self.current[guild_id] = track
+
+            print(
+                f"[Music] ▶️ Запущен: "
+                f"{track['title']}"
+            )
+
+            return True
+
+        except Exception as e:
+
+            print(
+                f"[Music] ❌ Ошибка запуска "
+                f"'{track['title']}': {e}"
+            )
+
+            return False
+
+    # ======================================================
+    # Callback после окончания трека
+    # ======================================================
+
+    def on_track_finished(
+        self,
+        guild_id: int,
+        error
+    ):
+
+        if error:
+            print(
+                f"[Music] Ошибка воспроизведения "
+                f"guild={guild_id}: {error}"
+            )
+
+        # Callback FFmpeg выполняется в другом потоке.
+        # Возвращаемся в asyncio loop.
+        self.bot.loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(
+                self.handle_track_finished(guild_id)
+            )
+        )
+
+    # ======================================================
+    # Обработка окончания трека
+    # ======================================================
+
+    async def handle_track_finished(
+        self,
+        guild_id: int
+    ):
+
+        # Если это был /skip —
+        # следующий трек уже будет запущен самим skip.
+        if self.skipping.get(guild_id, False):
+            self.skipping[guild_id] = False
+            return
+
+        voice_client = self.bot.get_guild(guild_id)
+
+        if voice_client is None:
+            self.current.pop(guild_id, None)
+            return
+
+        voice_client = voice_client.voice_client
+
+        if voice_client is None:
+            self.current.pop(guild_id, None)
+            return
+
+        await self.play_next(
+            guild_id,
+            voice_client
+        )
+
+    # ======================================================
+    # Запуск следующего трека
+    # ======================================================
+
+    async def play_next(
+        self,
+        guild_id: int,
+        voice_client: discord.VoiceClient
+    ):
+
+        queue = self.queues.setdefault(
+            guild_id,
+            []
+        )
 
         if not queue:
-            self.current.pop(guild_id, None)
+            self.current.pop(
+                guild_id,
+                None
+            )
+
+            print(
+                f"[Music] Очередь пуста "
+                f"guild={guild_id}"
+            )
+
             return
 
         track = queue.pop(0)
 
-        self.current[guild_id] = track
+        success = self.start_track(
+            guild_id,
+            voice_client,
+            track
+        )
 
-        audio_url = track["url"]
-        title = track["title"]
+        if not success:
 
-        try:
-            source = discord.FFmpegPCMAudio(
-                audio_url,
-                **FFMPEG_OPTIONS
+            # Если трек не запустился,
+            # пробуем следующий.
+            await self.play_next(
+                guild_id,
+                voice_client
             )
 
-            # Создаём Future, который завершится,
-            # когда FFmpeg закончит воспроизведение
-            finished = self.bot.loop.create_future()
-
-            def after(error):
-                if error:
-                    print(
-                        f"[Music] Ошибка воспроизведения "
-                        f"{guild_id}: {error}"
-                    )
-
-                # callback FFmpeg работает не обязательно
-                # внутри asyncio loop, поэтому используем
-                # call_soon_threadsafe
-                if not finished.done():
-                    self.bot.loop.call_soon_threadsafe(
-                        finished.set_result,
-                        error
-                    )
-
-            voice_client.play(source, after=after)
-
-            print(f"[Music] Воспроизведение: {title}")
-
-            await finished
-
-            # Если /skip уже вызвал остановку,
-            # не запускаем следующий трек здесь.
-            if getattr(voice_client, "_music_skip", False):
-                voice_client._music_skip = False
-                return
-
-            # Если бот всё ещё подключён —
-            # запускаем следующий трек
-            if voice_client.is_connected():
-                await self.play_next(guild_id, voice_client)
-
-        except Exception as e:
-            print(f"[Music] Ошибка: {e}")
-
-            # Пытаемся перейти к следующему треку
-            if voice_client.is_connected():
-                await self.play_next(guild_id, voice_client)
-
-    # =========================
+    # ======================================================
     # /play
-    # =========================
+    # ======================================================
 
     @app_commands.command(
         name="play",
@@ -146,88 +236,182 @@ class Music(commands.Cog):
         interaction: discord.Interaction,
         url: str
     ):
+
         await interaction.response.defer()
 
-        guild_id = interaction.guild.id
+        guild = interaction.guild
 
-        # Проверяем, что бот находится в голосовом канале
-        voice_client = interaction.guild.voice_client
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Эта команда доступна только на сервере."
+            )
+            return
 
-        if voice_client is None or not voice_client.is_connected():
+        guild_id = guild.id
+
+        # --------------------------------------------------
+        # Проверяем голосовое подключение
+        # --------------------------------------------------
+
+        voice_client = guild.voice_client
+
+        if (
+            voice_client is None
+            or not voice_client.is_connected()
+        ):
             await interaction.followup.send(
                 "❌ Я не нахожусь в голосовом канале."
             )
             return
 
-        # Получаем информацию о видео
+        # --------------------------------------------------
+        # Получаем данные YouTube
+        # --------------------------------------------------
+
         try:
-            info = await self.get_audio_info(url)
+
+            info = await self.get_audio_info(
+                url
+            )
 
         except Exception as e:
-            print(f"[Music] Ошибка yt-dlp: {e}")
+
+            print(
+                f"[Music] ❌ Ошибка yt-dlp:\n{e}"
+            )
 
             await interaction.followup.send(
-                "❌ Не удалось получить аудио с YouTube."
+                "❌ Не удалось получить аудио с YouTube.\n"
+                "Подробности смотри в консоли бота."
             )
+
             return
 
         if not info:
+
             await interaction.followup.send(
                 "❌ YouTube не вернул информацию о видео."
             )
+
             return
 
-        # Иногда yt-dlp возвращает entries
+        # --------------------------------------------------
+        # Если yt-dlp вернул entries
+        # --------------------------------------------------
+
         if "entries" in info:
-            entries = info.get("entries")
+
+            entries = info.get(
+                "entries"
+            )
 
             if not entries:
+
                 await interaction.followup.send(
                     "❌ Видео не найдено."
                 )
+
                 return
 
             info = entries[0]
 
-        track = {
-            "title": info.get("title", "Без названия"),
-            "url": info.get("url"),
-            "webpage_url": info.get("webpage_url", url),
-            "duration": info.get("duration"),
-        }
+        # --------------------------------------------------
+        # Формируем трек
+        # --------------------------------------------------
 
-        if not track["url"]:
+        audio_url = info.get(
+            "url"
+        )
+
+        if not audio_url:
+
             await interaction.followup.send(
-                "❌ Не удалось получить прямой аудиопоток."
+                "❌ Не удалось получить аудиопоток."
             )
+
             return
 
-        # Добавляем в очередь
-        queue = self.queues.setdefault(guild_id, [])
-        queue.append(track)
+        track = {
+            "title": info.get(
+                "title",
+                "Без названия"
+            ),
 
+            "url": audio_url,
+
+            "webpage_url": info.get(
+                "webpage_url",
+                url
+            ),
+
+            "duration": info.get(
+                "duration"
+            ),
+        }
+
+        # --------------------------------------------------
         # Если сейчас ничего не играет —
-        # начинаем воспроизведение
-        if not voice_client.is_playing() and not voice_client.is_paused():
-            asyncio.create_task(
-                self.play_next(guild_id, voice_client)
+        # запускаем сразу
+        # --------------------------------------------------
+
+        if (
+            not voice_client.is_playing()
+            and not voice_client.is_paused()
+        ):
+
+            success = self.start_track(
+                guild_id,
+                voice_client,
+                track
             )
+
+            if not success:
+
+                await interaction.followup.send(
+                    "❌ Не удалось запустить воспроизведение."
+                )
+
+                return
+
+            # ВАЖНО:
+            # здесь start_track уже вызвал
+            # voice_client.play()
+            #
+            # Поэтому только теперь говорим,
+            # что трек действительно запущен.
 
             await interaction.followup.send(
-                f"▶️ **Сейчас играет:** `{track['title']}`"
+                f"▶️ **Сейчас играет:** "
+                f"`{track['title']}`"
             )
 
-        else:
-            position = len(queue)
+            return
 
-            await interaction.followup.send(
-                f"🎵 Добавлено в очередь: `{track['title']}`\n"
-                f"Позиция в очереди: **{position}**"
-            )
+        # --------------------------------------------------
+        # Если музыка уже играет —
+        # добавляем в очередь
+        # --------------------------------------------------
 
-    # =========================
+        queue = self.queues.setdefault(
+            guild_id,
+            []
+        )
+
+        queue.append(
+            track
+        )
+
+        position = len(queue)
+
+        await interaction.followup.send(
+            f"🎵 **Добавлено в очередь:** "
+            f"`{track['title']}`\n"
+            f"Позиция: **{position}**"
+        )
+
+    # ======================================================
     # /pause
-    # =========================
+    # ======================================================
 
     @app_commands.command(
         name="pause",
@@ -237,7 +421,16 @@ class Music(commands.Cog):
         self,
         interaction: discord.Interaction
     ):
-        voice_client = interaction.guild.voice_client
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ Эта команда доступна только на сервере."
+            )
+            return
+
+        voice_client = guild.voice_client
 
         if voice_client is None:
             await interaction.response.send_message(
@@ -246,15 +439,19 @@ class Music(commands.Cog):
             return
 
         if voice_client.is_paused():
+
             await interaction.response.send_message(
                 "⏸️ Музыка уже стоит на паузе."
             )
+
             return
 
         if not voice_client.is_playing():
+
             await interaction.response.send_message(
                 "❌ Сейчас ничего не играет."
             )
+
             return
 
         voice_client.pause()
@@ -263,9 +460,9 @@ class Music(commands.Cog):
             "⏸️ Музыка поставлена на паузу."
         )
 
-    # =========================
+    # ======================================================
     # /skip
-    # =========================
+    # ======================================================
 
     @app_commands.command(
         name="skip",
@@ -275,7 +472,18 @@ class Music(commands.Cog):
         self,
         interaction: discord.Interaction
     ):
-        voice_client = interaction.guild.voice_client
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ Эта команда доступна только на сервере."
+            )
+            return
+
+        guild_id = guild.id
+
+        voice_client = guild.voice_client
 
         if voice_client is None:
             await interaction.response.send_message(
@@ -283,45 +491,85 @@ class Music(commands.Cog):
             )
             return
 
-        if not voice_client.is_playing() and not voice_client.is_paused():
+        if (
+            not voice_client.is_playing()
+            and not voice_client.is_paused()
+        ):
+
             await interaction.response.send_message(
                 "❌ Сейчас ничего не играет."
             )
+
             return
 
-        # Ставим флаг, чтобы текущий play_next
-        # не запустил следующий трек самостоятельно
-        voice_client._music_skip = True
+        # --------------------------------------------------
+        # Отмечаем, что трек пропускается
+        # --------------------------------------------------
 
+        self.skipping[guild_id] = True
+
+        # Останавливаем текущий трек.
+        #
+        # Это вызовет callback FFmpeg,
+        # но handle_track_finished увидит
+        # skipping=True и НЕ запустит следующий.
         voice_client.stop()
 
-        # Небольшая задержка, чтобы callback успел завершить Future
-        await asyncio.sleep(0.1)
+        # --------------------------------------------------
+        # Запускаем следующий трек
+        # --------------------------------------------------
 
-        guild_id = interaction.guild.id
-        queue = self.queues.setdefault(guild_id, [])
+        queue = self.queues.setdefault(
+            guild_id,
+            []
+        )
 
         if queue:
-            await interaction.response.send_message(
-                f"⏭️ Трек пропущен. Следующий: "
-                f"`{queue[0]['title']}`"
+
+            next_track = queue.pop(0)
+
+            success = self.start_track(
+                guild_id,
+                voice_client,
+                next_track
             )
 
-            asyncio.create_task(
-                self.play_next(guild_id, voice_client)
-            )
+            self.skipping[guild_id] = False
+
+            if success:
+
+                await interaction.response.send_message(
+                    f"⏭️ **Пропущено. Сейчас играет:** "
+                    f"`{next_track['title']}`"
+                )
+
+            else:
+
+                await interaction.response.send_message(
+                    "⏭️ Трек пропущен, "
+                    "но следующий трек не удалось запустить."
+                )
 
         else:
-            self.current.pop(guild_id, None)
+
+            self.current.pop(
+                guild_id,
+                None
+            )
+
+            self.skipping[guild_id] = False
 
             await interaction.response.send_message(
                 "⏭️ Трек пропущен. Очередь пуста."
             )
 
 
-# =========================
+# ==========================================================
 # Загрузка Cog
-# =========================
+# ==========================================================
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Music(bot))
+
+    await bot.add_cog(
+        Music(bot)
+    )
