@@ -5,3 +5,4 @@ pyTelegramBotAPI
 requests
 python-chess
 Pillow
+yt-dlp
